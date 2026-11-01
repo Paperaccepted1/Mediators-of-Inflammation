@@ -1,0 +1,1481 @@
+
+##Table 2 and Supplementary Table 4: baseline characteristics by platelet trajectory subtype##########
+rm(list = ls())
+gc()
+suppressPackageStartupMessages({
+  library(readxl)
+  library(dplyr)
+  library(tidyr)
+  library(openxlsx)
+})
+data_dir <- "data"
+output_dir <- "output"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+#Fixed column order (high to low)
+group_levels <- c("High", "High-Normal", "Normal", "Low")
+#Read MIMIC-IV data (long format, one row per patient-day); keep day 0 rows
+cat("Reading MIMIC-IV data\n")
+raw_iv <- read_excel(file.path(data_dir, "mimic4_cohort.xlsx"))
+merged_data <- raw_iv %>% dplyr::filter(day == 0)
+merged_data$Subtype_Name <- factor(merged_data$Subtype_Name, levels = group_levels)
+cat("MIMIC-IV patients per subtype:\n")
+print(table(merged_data$Subtype_Name))
+#Read MIMIC-III data
+cat("\nReading MIMIC-III data\n")
+raw_iii <- read_xlsx(file.path(data_dir, "mimic3_cohort.xlsx"))
+mimic3_baseline <- raw_iii %>% dplyr::filter(day == 0)
+mimic3_baseline$Subtype_Name <- factor(mimic3_baseline$Subtype_Name, levels = group_levels)
+cat("MIMIC-III patients per subtype:\n")
+print(table(mimic3_baseline$Subtype_Name))
+#Variable labels
+var_labels <- c(
+  "age" = "Age, years",
+  "gender" = "Sex, male",
+  "weight" = "Weight, kg",
+  "bmi" = "BMI, kg/m²",
+  "apsiii" = "APS III score",
+  "sapsii" = "SAPS II score",
+  "oasis" = "OASIS score",
+  "lods" = "LODS score",
+  "sofa" = "SOFA score",
+  "modified_sofa" = "Modified SOFA score",
+  "gcs" = "GCS score",
+  "charlson" = "Charlson index",
+  "vs_24h_map_first" = "MAP, mmHg",
+  "vs_24h_sbp_first" = "Systolic BP, mmHg",
+  "vs_24h_dbp_first" = "Diastolic BP, mmHg",
+  "vs_24h_heart_rate_first" = "Heart rate, bpm",
+  "vs_24h_temp_first" = "Temperature, °C",
+  "vs_24h_resp_rate_first" = "Respiratory rate, /min",
+  "vs_24h_spo2_first" = "SpO₂, %",
+  "baseline_cr" = "Baseline creatinine, mg/dL",
+  "lab_fst_24h_bun_first" = "BUN, mg/dL",
+  "lab_fst_24h_hco3_first" = "Bicarbonate, mmol/L",
+  "lab_fst_24h_platelet_first" = "Platelet count, ×10⁹/L",
+  "lab_fst_24h_wbc_first" = "WBC, ×10⁹/L",
+  "lab_fst_24h_hemoglobin_first" = "Hemoglobin, g/dL",
+  "lab_fst_24h_hct_first" = "Hematocrit, %",
+  "lab_fst_24h_inr_first" = "INR",
+  "lab_fst_24h_pt_first" = "PT, sec",
+  "lab_fst_24h_aptt_first" = "aPTT, sec",
+  "lab_fst_24h_ca_first" = "Calcium, mg/dL",
+  "lab_fst_24h_cl_first" = "Chloride, mEq/L",
+  "lab_fst_24h_na_first" = "Sodium, mEq/L",
+  "lab_fst_24h_k_first" = "Potassium, mEq/L",
+  "lab_fst_24h_bg_first" = "Glucose, mg/dL",
+  "itvtn_24h_vent_tag" = "Mechanical ventilation, yes",
+  "drug_24h_sedative_tag" = "Sedative use, yes",
+  "drug_24h_vaso_tag" = "Vasopressor use, yes",
+  "icd_diabetes" = "Diabetes, yes",
+  "icd_hypertension" = "Hypertension, yes",
+  "icd_hf" = "Heart failure, yes",
+  "icd_liver" = "Liver disease, yes",
+  "icd_renal" = "Renal disease, yes",
+  "platelet_transfusion" = "Platelet transfusion (24 h), yes",
+  "heparin_use" = "Heparin use (24 h), yes",
+  "nephrotoxic_drugs" = "Nephrotoxic drugs (24 h), yes",
+  "insulin_use" = "Insulin use (24 h), yes",
+  "chemo_heme_malig" = "Chemo/heme malignancy, yes",
+  "asplenia" = "Asplenia, yes",
+  "iron_deficiency" = "Iron deficiency, yes",
+  "any_malignancy" = "Any malignancy, yes",
+  "chronic_inflammatory" = "Chronic inflammatory disease, yes"
+)
+#Summary statistics
+median_iqr <- function(x) {
+  x <- x[!is.na(x)]
+  if (length(x) == 0) return("—")
+  sprintf("%.2f [%.2f, %.2f]", median(x), quantile(x, 0.25), quantile(x, 0.75))
+}
+n_pct <- function(x) {
+  x <- x[!is.na(x)]
+  n_yes <- sum(as.numeric(x))
+  sprintf("%d (%.1f)", n_yes, 100 * n_yes / length(x))
+}
+np <- function(n, total) sprintf("%d (%.1f)", n, 100*n/total)
+calc_pvalue <- function(data, var, group_var, is_binary) {
+  tryCatch({
+    if (is_binary) {
+      tbl <- table(factor(data[[var]]), data[[group_var]])
+      if (any(tbl < 5)) p <- fisher.test(tbl, simulate.p.value = TRUE, B = 2000)$p.value
+      else p <- chisq.test(tbl)$p.value
+    } else {
+      p <- kruskal.test(as.formula(paste(var, "~", group_var)), data = data)$p.value
+    }
+    if (p < 0.001) return("<0.001") else return(sprintf("%.3f", p))
+  }, error = function(e) return("—"))
+}
+#Maximum standardized difference between each subtype and the overall cohort
+calc_smd_max <- function(data, var, group_var, is_binary) {
+  groups <- levels(data[[group_var]])
+  k <- length(groups)
+  if (is_binary) {
+    props <- sapply(groups, function(g) mean(as.numeric(data[[var]][data[[group_var]] == g]), na.rm = TRUE))
+    ns <- sapply(groups, function(g) sum(data[[group_var]] == g))
+    p_all <- weighted.mean(props, ns)
+    if (p_all == 0 | p_all == 1) return("<0.01")
+    return(sprintf("%.2f", max(abs(props - p_all) / sqrt(p_all * (1 - p_all)))))
+  } else {
+    means <- sapply(groups, function(g) mean(data[[var]][data[[group_var]] == g], na.rm = TRUE))
+    sds <- sapply(groups, function(g) sd(data[[var]][data[[group_var]] == g], na.rm = TRUE))
+    ns <- sapply(groups, function(g) sum(data[[group_var]] == g))
+    overall <- weighted.mean(means, ns)
+    pooled <- sqrt(sum((ns - 1) * sds^2) / (sum(ns) - k))
+    if (pooled == 0) return("<0.01")
+    return(sprintf("%.2f", max(abs(means - overall) / pooled)))
+  }
+}
+#Build one row (fixed group order)
+generate_row <- function(data, var, group_var, is_binary) {
+  label <- ifelse(var %in% names(var_labels), var_labels[var], var)
+  values <- sapply(group_levels, function(g) {
+    subset_x <- data[[var]][data[[group_var]] == g]
+    if (is_binary) n_pct(subset_x) else median_iqr(subset_x)
+  })
+  p_val <- calc_pvalue(data, var, group_var, is_binary)
+  smd <- calc_smd_max(data, var, group_var, is_binary)
+  row <- data.frame(Variable = label, stringsAsFactors = FALSE)
+  for (i in seq_along(group_levels)) row[[group_levels[i]]] <- values[i]
+  row$P_value <- p_val
+  row$SMD <- smd
+  return(row)
+}
+#Section header row
+section_row <- function(title) {
+  row <- data.frame(Variable = title, stringsAsFactors = FALSE)
+  for (g in group_levels) row[[g]] <- ""
+  row$P_value <- ""
+  row$SMD <- ""
+  return(row)
+}
+#Site of infection cross-tabulated from the data
+generate_infection_site_rows <- function(data, group_var) {
+  site_labels <- c("Pulmonary", "Abdominal", "Urinary tract",
+                   "Bloodstream", "Skin/soft tissue", "Other/unknown")
+  sc <- table(data[[group_var]])
+  site_table <- table(data$infection_site, data[[group_var]])
+  p_val <- tryCatch({
+    ct <- chisq.test(site_table)
+    if (ct$p.value < 0.001) "<0.001" else sprintf("%.3f", ct$p.value)
+  }, error = function(e) "—")
+  #SMD: maximum across infection-site dummy variables
+  smd_val <- tryCatch({
+    max_smd <- 0
+    for (site in site_labels) {
+      dummy <- as.numeric(data$infection_site == site)
+      props <- sapply(group_levels, function(g) mean(dummy[data[[group_var]] == g], na.rm = TRUE))
+      ns <- sapply(group_levels, function(g) sum(data[[group_var]] == g))
+      p_all <- weighted.mean(props, ns)
+      if (p_all > 0 & p_all < 1) {
+        site_smd <- max(abs(props - p_all) / sqrt(p_all * (1 - p_all)))
+        max_smd <- max(max_smd, site_smd)
+      }
+    }
+    sprintf("%.2f", max_smd)
+  }, error = function(e) "—")
+  rows <- list()
+  for (j in seq_along(site_labels)) {
+    row <- data.frame(Variable = paste0("  ", site_labels[j]), stringsAsFactors = FALSE)
+    for (g in group_levels) {
+      n_site <- ifelse(site_labels[j] %in% rownames(site_table),
+                       site_table[site_labels[j], g], 0)
+      row[[g]] <- np(n_site, sc[g])
+    }
+    row$P_value <- ifelse(j == 1, p_val, "")
+    row$SMD <- ifelse(j == 1, smd_val, "")
+    rows[[j]] <- row
+  }
+  return(rows)
+}
+#Build the full table
+generate_full_table <- function(data, bin_vars, group_var) {
+  rows <- list()
+  i <- 1
+  rows[[i]] <- section_row("Demographics"); i <- i + 1
+  for (v in c("age", "gender", "weight", "bmi")) {
+    if (v %in% colnames(data)) { rows[[i]] <- generate_row(data, v, group_var, v %in% bin_vars); i <- i + 1 }
+  }
+  rows[[i]] <- section_row("Severity scores"); i <- i + 1
+  for (v in c("apsiii", "sapsii", "oasis", "lods", "sofa", "modified_sofa", "gcs", "charlson")) {
+    if (v %in% colnames(data)) { rows[[i]] <- generate_row(data, v, group_var, FALSE); i <- i + 1 }
+  }
+  rows[[i]] <- section_row("Vital signs (first 24 h)"); i <- i + 1
+  for (v in c("vs_24h_map_first", "vs_24h_sbp_first", "vs_24h_dbp_first",
+              "vs_24h_heart_rate_first", "vs_24h_temp_first",
+              "vs_24h_resp_rate_first", "vs_24h_spo2_first")) {
+    if (v %in% colnames(data)) { rows[[i]] <- generate_row(data, v, group_var, FALSE); i <- i + 1 }
+  }
+  rows[[i]] <- section_row("Laboratory values (first 24 h)"); i <- i + 1
+  for (v in c("baseline_cr", "lab_fst_24h_bun_first", "lab_fst_24h_hco3_first",
+              "lab_fst_24h_platelet_first", "lab_fst_24h_wbc_first",
+              "lab_fst_24h_hemoglobin_first", "lab_fst_24h_hct_first",
+              "lab_fst_24h_inr_first", "lab_fst_24h_pt_first", "lab_fst_24h_aptt_first",
+              "lab_fst_24h_ca_first", "lab_fst_24h_cl_first",
+              "lab_fst_24h_na_first", "lab_fst_24h_k_first", "lab_fst_24h_bg_first")) {
+    if (v %in% colnames(data)) { rows[[i]] <- generate_row(data, v, group_var, FALSE); i <- i + 1 }
+  }
+  rows[[i]] <- section_row("Treatments (first 24 h)"); i <- i + 1
+  for (v in c("itvtn_24h_vent_tag", "drug_24h_vaso_tag", "insulin_use",
+              "drug_24h_sedative_tag", "platelet_transfusion", "heparin_use", "nephrotoxic_drugs")) {
+    if (v %in% colnames(data)) { rows[[i]] <- generate_row(data, v, group_var, TRUE); i <- i + 1 }
+  }
+  rows[[i]] <- section_row("Comorbidities"); i <- i + 1
+  for (v in c("icd_diabetes", "icd_hypertension", "icd_hf", "icd_liver", "icd_renal",
+              "chemo_heme_malig", "asplenia", "iron_deficiency", "any_malignancy", "chronic_inflammatory")) {
+    if (v %in% colnames(data)) { rows[[i]] <- generate_row(data, v, group_var, TRUE); i <- i + 1 }
+  }
+  if ("infection_site" %in% colnames(data)) {
+    rows[[i]] <- section_row("Site of infection"); i <- i + 1
+    site_rows <- generate_infection_site_rows(data, group_var)
+    for (sr in site_rows) { rows[[i]] <- sr; i <- i + 1 }
+  }
+  result <- bind_rows(rows)
+  return(result)
+}
+#Binary variables
+binary_vars <- c("gender", "itvtn_24h_vent_tag", "drug_24h_sedative_tag", "drug_24h_vaso_tag",
+                 "icd_diabetes", "icd_hypertension", "icd_hf", "icd_liver", "icd_renal",
+                 "insulin_use", "platelet_transfusion", "heparin_use", "nephrotoxic_drugs",
+                 "chemo_heme_malig", "asplenia", "iron_deficiency", "any_malignancy", "chronic_inflammatory")
+#Table 2 (MIMIC-IV)
+cat("\nBuilding Table 2 (MIMIC-IV)\n")
+bin_vars_iv <- binary_vars[binary_vars %in% colnames(merged_data)]
+table2 <- generate_full_table(merged_data, bin_vars_iv, "Subtype_Name")
+sc_iv <- table(merged_data$Subtype_Name)
+colnames(table2) <- c("Variable",
+                      sprintf("High (n=%d)", sc_iv["High"]),
+                      sprintf("High-Normal (n=%d)", sc_iv["High-Normal"]),
+                      sprintf("Normal (n=%d)", sc_iv["Normal"]),
+                      sprintf("Low (n=%d)", sc_iv["Low"]),
+                      "P value", "SMD")
+#Supplementary Table 4 (MIMIC-III)
+cat("\nBuilding Supplementary Table 4 (MIMIC-III)\n")
+bin_vars_iii <- binary_vars[binary_vars %in% colnames(mimic3_baseline)]
+table_s4 <- generate_full_table(mimic3_baseline, bin_vars_iii, "Subtype_Name")
+sc_iii <- table(mimic3_baseline$Subtype_Name)
+colnames(table_s4) <- c("Variable",
+                        sprintf("High (n=%d)", sc_iii["High"]),
+                        sprintf("High-Normal (n=%d)", sc_iii["High-Normal"]),
+                        sprintf("Normal (n=%d)", sc_iii["Normal"]),
+                        sprintf("Low (n=%d)", sc_iii["Low"]),
+                        "P value", "SMD")
+#Save
+wb <- createWorkbook()
+addWorksheet(wb, "Table2_MIMIC_IV")
+writeData(wb, "Table2_MIMIC_IV", table2)
+addWorksheet(wb, "SuppTable4_MIMIC_III")
+writeData(wb, "SuppTable4_MIMIC_III", table_s4)
+saveWorkbook(wb, file.path(output_dir, "Table2_SuppTable4.xlsx"), overwrite = TRUE)
+cat("Saved: Table2_SuppTable4.xlsx\n")
+print(table2, row.names = FALSE)
+print(table_s4, row.names = FALSE)
+
+##Figure 3: platelet trajectory subtypes and AKI (incidence, multivariable logistic regression and adjusted absolute risk differences)##########
+rm(list = ls())
+gc()
+suppressPackageStartupMessages({
+  library(readxl)
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(patchwork)
+  library(openxlsx)
+  library(logistf)
+  library(RColorBrewer)
+  library(ggsci)
+})
+data_dir <- "data"
+output_dir <- "output"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+#Fixed subtype order (high to low); the largest subtype (Normal) is the reference
+group_levels <- c("High", "High-Normal", "Normal", "Low")
+ref_level <- "Normal"
+#AKI stage labels
+stage_levels <- c("No AKI", "KDIGO stage 1", "KDIGO stage 2\u20133")
+#Number of bootstrap samples for the 95% CI of the adjusted risk difference
+n_boot <- 500
+set.seed(2026)
+#Covariates: modified SOFA instead of total SOFA, plus liver disease, platelet transfusion, heparin, nephrotoxic drugs, chemotherapy/haematological malignancy and site of infection
+adjust_vars <- c("age", "gender", "bmi", "modified_sofa", "charlson", "baseline_cr",
+                 "itvtn_24h_vent_tag", "drug_24h_vaso_tag", "icd_liver",
+                 "platelet_transfusion", "heparin_use", "nephrotoxic_drugs",
+                 "chemo_heme_malig", "infection_site")
+#Colours: AKI stage from light blue (no AKI) to orange (stage 1) and dark red (stage 2-3); cohorts distinguished with the JAMA palette
+aki_cols <- setNames(RColorBrewer::brewer.pal(11, "RdYlBu")[c(8, 4, 1)], stage_levels)
+cohort_cols <- setNames(ggsci::pal_jama("default")(2), c("MIMIC-IV", "MIMIC-III"))
+#Read data, keep day 0 rows (one row per patient), build AKI stage and model variables
+read_cohort <- function(file_name, cohort_name) {
+  d <- readxl::read_excel(file.path(data_dir, file_name)) %>% dplyr::filter(day == 0)
+  need_vars <- c("Subtype_Name", "outcome_aki_7d", "aki_stage_7d", adjust_vars)
+  miss_vars <- setdiff(need_vars, colnames(d))
+  if (length(miss_vars) > 0) stop(paste0(cohort_name, " missing variables: ", paste(miss_vars, collapse = ", ")))
+  n_raw <- nrow(d)
+  d <- d %>% dplyr::filter(!is.na(outcome_aki_7d), !is.na(Subtype_Name))
+  cat(cohort_name, ": read", n_raw, "patients; complete outcome and subtype", nrow(d), "patients\n")
+  d <- d %>%
+    dplyr::mutate(
+      Cohort = cohort_name,
+      Subtype_Name = factor(Subtype_Name, levels = group_levels),
+      Subtype_Model = stats::relevel(factor(as.character(Subtype_Name), levels = group_levels), ref = ref_level),
+      severe_aki_7d = as.integer(outcome_aki_7d == 1 & !is.na(aki_stage_7d) & aki_stage_7d >= 2),
+      AKI_Category = dplyr::case_when(
+        outcome_aki_7d == 0 ~ stage_levels[1],
+        aki_stage_7d == 1 ~ stage_levels[2],
+        aki_stage_7d >= 2 ~ stage_levels[3],
+        TRUE ~ NA_character_
+      ),
+      AKI_Category = factor(AKI_Category, levels = stage_levels),
+      infection_site = factor(infection_site)
+    )
+  if ("Pulmonary" %in% levels(d$infection_site)) d$infection_site <- stats::relevel(d$infection_site, ref = "Pulmonary")
+  if (any(is.na(d$AKI_Category))) cat("Note:", sum(is.na(d$AKI_Category)), "AKI patients without stage\n")
+  d
+}
+dat_iv <- read_cohort("mimic4_cohort.xlsx", "MIMIC-IV")
+dat_iii <- read_cohort("mimic3_cohort.xlsx", "MIMIC-III")
+cohort_list <- list("MIMIC-IV" = dat_iv, "MIMIC-III" = dat_iii)
+#Check subtype sizes and AKI stages (should match Tables 1 and 2)
+for (cn in names(cohort_list)) {
+  cat("\n", cn, "AKI stage by subtype:\n")
+  print(table(cohort_list[[cn]]$Subtype_Name, cohort_list[[cn]]$AKI_Category, useNA = "ifany"))
+  if ("outcome_severe_aki_7d" %in% colnames(cohort_list[[cn]])) {
+    cat("Severe AKI derived from stage vs original variable:\n")
+    print(table(derived = cohort_list[[cn]]$severe_aki_7d, original = cohort_list[[cn]]$outcome_severe_aki_7d, useNA = "ifany"))
+  }
+}
+#P value format for figures (plotmath expression, italic P)
+p_expr <- function(p) {
+  if (p < 0.0001) return('paste(italic(P), " < 0.0001")')
+  if (p < 0.001) return(paste0('paste(italic(P), " = ', sprintf("%.4f", p), '")'))
+  paste0('paste(italic(P), " = ', sprintf("%.3f", p), '")')
+}
+#P value format for Excel (plain text)
+p_text <- function(p) {
+  ifelse(is.na(p), "", ifelse(p < 0.0001, "<0.0001", ifelse(p < 0.001, sprintf("%.4f", p), sprintf("%.3f", p))))
+}
+#Incidence of AKI and severe AKI by subtype (Clopper-Pearson exact 95% CI)
+calc_incidence <- function(d) {
+  d %>%
+    dplyr::group_by(Cohort, Subtype_Name) %>%
+    dplyr::summarise(N = dplyr::n(),
+                     n_no = sum(AKI_Category == stage_levels[1], na.rm = TRUE),
+                     n_s1 = sum(AKI_Category == stage_levels[2], na.rm = TRUE),
+                     n_s23 = sum(severe_aki_7d == 1),
+                     n_aki = sum(outcome_aki_7d == 1),
+                     .groups = "drop") %>%
+    dplyr::rowwise() %>%
+    dplyr::mutate(aki_rate = 100 * n_aki / N,
+                  aki_lo = 100 * stats::binom.test(n_aki, N)$conf.int[1],
+                  aki_hi = 100 * stats::binom.test(n_aki, N)$conf.int[2],
+                  severe_rate = 100 * n_s23 / N,
+                  severe_lo = 100 * stats::binom.test(n_s23, N)$conf.int[1],
+                  severe_hi = 100 * stats::binom.test(n_s23, N)$conf.int[2]) %>%
+    dplyr::ungroup()
+}
+#Pairwise comparison of AKI incidence with the Normal subtype (Bonferroni corrected); Fisher exact test when expected counts < 5
+calc_pairwise <- function(d) {
+  comp_levels <- setdiff(group_levels, ref_level)
+  res <- lapply(comp_levels, function(g) {
+    sub_d <- d %>% dplyr::filter(Subtype_Name %in% c(ref_level, g))
+    tb <- table(droplevels(sub_d$Subtype_Name), sub_d$outcome_aki_7d)
+    ct <- suppressWarnings(stats::chisq.test(tb))
+    p_raw <- if (any(ct$expected < 5)) stats::fisher.test(tb)$p.value else ct$p.value
+    data.frame(Cohort = unique(d$Cohort), Subtype_Name = g, p_raw = p_raw)
+  })
+  out <- dplyr::bind_rows(res)
+  out$p_bonf <- stats::p.adjust(out$p_raw, method = "bonferroni")
+  out
+}
+#Overall chi-squared test of AKI incidence across the four subtypes
+calc_overall_p <- function(d) suppressWarnings(stats::chisq.test(table(d$Subtype_Name, d$outcome_aki_7d)))$p.value
+inc_all <- dplyr::bind_rows(lapply(cohort_list, calc_incidence))
+pw_all <- dplyr::bind_rows(lapply(cohort_list, calc_pairwise))
+overall_p <- sapply(cohort_list, calc_overall_p)
+cat("\nAKI incidence by subtype:\n")
+print(as.data.frame(inc_all))
+cat("\nPairwise comparisons with Normal:\n")
+print(pw_all)
+cat("\nOverall chi-squared P values:\n")
+print(overall_p)
+#Common theme: L-shaped black axes, no grid lines, transparent legend background
+theme_fig <- theme_classic(base_size = 11) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 12),
+        axis.title = element_text(face = "bold", colour = "black"),
+        axis.text = element_text(colour = "black", size = 10),
+        axis.line = element_line(colour = "black", linewidth = 0.5),
+        axis.ticks = element_line(colour = "black", linewidth = 0.5),
+        panel.grid = element_blank(),
+        legend.position = "bottom",
+        legend.background = element_blank(),
+        legend.key = element_blank(),
+        legend.text = element_text(size = 10))
+#Panels A and B: stacked bars of AKI stage by subtype, AKI incidence above bars, P values vs Normal above
+plot_bar <- function(d, title_text) {
+  cn <- unique(d$Cohort)
+  dist_df <- d %>%
+    dplyr::filter(!is.na(AKI_Category)) %>%
+    dplyr::count(Subtype_Name, AKI_Category) %>%
+    dplyr::group_by(Subtype_Name) %>%
+    dplyr::mutate(pct = 100 * n / sum(n)) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(AKI_Category = factor(as.character(AKI_Category), levels = rev(stage_levels)))
+  lab_df <- inc_all %>%
+    dplyr::filter(Cohort == cn) %>%
+    dplyr::mutate(lab = sprintf("%.1f%%\n(%d/%d)", aki_rate, n_aki, N))
+  pw <- pw_all %>% dplyr::filter(Cohort == cn)
+  p <- ggplot(dist_df, aes(x = Subtype_Name, y = pct, fill = AKI_Category)) +
+    geom_col(width = 0.68, colour = "white", linewidth = 0.3) +
+    geom_text(data = lab_df, aes(x = Subtype_Name, y = 101.5, label = lab), inherit.aes = FALSE, vjust = 0, size = 3.1, lineheight = 0.9) +
+    scale_fill_manual(values = aki_cols, breaks = stage_levels, name = NULL) +
+    scale_x_discrete(drop = FALSE) +
+    scale_y_continuous(limits = c(0, 142), breaks = seq(0, 100, 20), expand = c(0, 0)) +
+    guides(y = guide_axis(cap = "upper")) +
+    labs(x = NULL, y = "Proportion of patients (%)", title = title_text) +
+    theme_fig
+  #Comparisons of each subtype with Normal: horizontal line plus P value (Bonferroni corrected)
+  x_pos <- setNames(seq_along(group_levels), group_levels)
+  bracket_y <- c("Low" = 116, "High-Normal" = 124, "High" = 132)
+  for (g in names(bracket_y)) {
+    x1 <- unname(min(x_pos[c(g, ref_level)]))
+    x2 <- unname(max(x_pos[c(g, ref_level)]))
+    y0 <- unname(bracket_y[g])
+    p <- p +
+      annotate("segment", x = x1, xend = x2, y = y0, yend = y0, linewidth = 0.4, colour = "black") +
+      annotate("text", x = (x1 + x2) / 2, y = y0 + 1, label = p_expr(pw$p_bonf[pw$Subtype_Name == g]), parse = TRUE, vjust = 0, size = 3.2)
+  }
+  p
+}
+#Multivariable models: logistic regression for any AKI, Firth penalized logistic regression for severe AKI; adjusted risk differences by g-computation with bootstrap
+fit_adjusted <- function(d, outcome, firth, outcome_label) {
+  cn <- unique(d$Cohort)
+  dc <- d %>%
+    dplyr::select(dplyr::all_of(c(outcome, "Subtype_Model", adjust_vars))) %>%
+    stats::na.omit() %>%
+    as.data.frame()
+  dc$infection_site <- droplevels(dc$infection_site)
+  form <- stats::as.formula(paste(outcome, "~ Subtype_Model +", paste(adjust_vars, collapse = " + ")))
+  rhs <- stats::delete.response(stats::terms(form))
+  mm_names <- colnames(stats::model.matrix(form, dc))
+  sub_idx <- grep("^Subtype_Model", mm_names)
+  #Fit the main model and extract subtype ORs, 95% CIs and P values
+  if (firth) {
+    fit <- logistf::logistf(form, data = dc, plconf = sub_idx)
+    beta <- fit$coefficients
+    or_df <- data.frame(term = names(beta)[sub_idx], OR = exp(beta[sub_idx]),
+                        OR_lo = exp(fit$ci.lower[sub_idx]), OR_hi = exp(fit$ci.upper[sub_idx]),
+                        P = fit$prob[sub_idx])
+  } else {
+    fit <- stats::glm(form, data = dc, family = stats::binomial())
+    beta <- stats::coef(fit)
+    ci <- tryCatch(suppressMessages(stats::confint(fit, parm = names(beta)[sub_idx])),
+                   error = function(e) stats::confint.default(fit, parm = names(beta)[sub_idx]))
+    or_df <- data.frame(term = names(beta)[sub_idx], OR = exp(beta[sub_idx]),
+                        OR_lo = exp(ci[, 1]), OR_hi = exp(ci[, 2]),
+                        P = summary(fit)$coefficients[sub_idx, 4])
+  }
+  or_df$Subtype <- sub("^Subtype_Model", "", or_df$term)
+  #g-computation: set all patients to each subtype in turn and average the predicted risks
+  risk_by_level <- function(b, dd) {
+    sapply(levels(dd$Subtype_Model), function(l) {
+      nd <- dd
+      nd$Subtype_Model <- factor(l, levels = levels(dd$Subtype_Model))
+      X <- stats::model.matrix(rhs, nd)
+      bb <- b[colnames(X)]
+      bb[is.na(bb)] <- 0
+      mean(stats::plogis(drop(X %*% bb)))
+    })
+  }
+  risk_point <- risk_by_level(beta, dc)
+  #Bootstrap percentile 95% CI for the adjusted risk difference
+  boot_mat <- matrix(NA_real_, nrow = n_boot, ncol = length(risk_point), dimnames = list(NULL, names(risk_point)))
+  for (b in seq_len(n_boot)) {
+    bd <- dc[sample.int(nrow(dc), replace = TRUE), , drop = FALSE]
+    bd$infection_site <- droplevels(bd$infection_site)
+    beta_b <- tryCatch(suppressWarnings(if (firth) logistf::logistf(form, data = bd, pl = FALSE)$coefficients else stats::coef(stats::glm(form, data = bd, family = stats::binomial()))), error = function(e) NULL)
+    if (!is.null(beta_b)) boot_mat[b, ] <- risk_by_level(beta_b, bd)
+    if (b %% 100 == 0) cat(cn, outcome_label, "bootstrap progress:", b, "/", n_boot, "\n")
+  }
+  n_ok <- sum(stats::complete.cases(boot_mat))
+  rd_boot <- 100 * (boot_mat - boot_mat[, ref_level])
+  rd_df <- data.frame(Subtype = names(risk_point),
+                      Risk = 100 * unname(risk_point),
+                      RD = 100 * unname(risk_point - risk_point[ref_level]),
+                      RD_lo = unname(apply(rd_boot, 2, stats::quantile, probs = 0.025, na.rm = TRUE)),
+                      RD_hi = unname(apply(rd_boot, 2, stats::quantile, probs = 0.975, na.rm = TRUE)))
+  #Number of patients and events per subtype in the model
+  ev_df <- dc %>%
+    dplyr::group_by(Subtype = as.character(Subtype_Model)) %>%
+    dplyr::summarise(N_model = dplyr::n(), Events = sum(.data[[outcome]] == 1), .groups = "drop")
+  data.frame(Subtype = group_levels) %>%
+    dplyr::left_join(ev_df, by = "Subtype") %>%
+    dplyr::left_join(or_df %>% dplyr::select(Subtype, OR, OR_lo, OR_hi, P), by = "Subtype") %>%
+    dplyr::left_join(rd_df, by = "Subtype") %>%
+    dplyr::mutate(Cohort = cn, Outcome = outcome_label,
+                  Method = ifelse(firth, "Firth logistic regression", "Logistic regression"),
+                  N_total = nrow(dc), Boot_success = n_ok)
+}
+cat("\nFitting multivariable models (with bootstrap; this takes several minutes)\n")
+res_any <- dplyr::bind_rows(fit_adjusted(dat_iv, "outcome_aki_7d", FALSE, "AKI (any stage)"),
+                            fit_adjusted(dat_iii, "outcome_aki_7d", FALSE, "AKI (any stage)"))
+res_severe <- dplyr::bind_rows(fit_adjusted(dat_iv, "severe_aki_7d", TRUE, "Severe AKI (stage 2-3)"),
+                               fit_adjusted(dat_iii, "severe_aki_7d", TRUE, "Severe AKI (stage 2-3)"))
+cat("\nAny AKI model results:\n")
+print(res_any)
+cat("\nSevere AKI model results:\n")
+print(res_severe)
+#Panels C and D: forest plots (log scale) for both cohorts, with ORs and adjusted risk differences on the right
+plot_forest <- function(res, title_text) {
+  yb <- setNames(rev(seq_along(group_levels)), group_levels)
+  y_off <- c("MIMIC-IV" = 0.16, "MIMIC-III" = -0.16)
+  est <- res %>%
+    dplyr::filter(Subtype != ref_level) %>%
+    dplyr::mutate(y = unname(yb[Subtype] + y_off[Cohort]),
+                  Cohort = factor(Cohort, levels = c("MIMIC-IV", "MIMIC-III")),
+                  or_lab = sprintf("%.2f (%.2f\u2013%.2f)", OR, OR_lo, OR_hi),
+                  rd_lab = sprintf("%.1f (%.1f to %.1f)", RD, RD_lo, RD_hi))
+  x_lo <- min(c(est$OR_lo, 1)) / 1.3
+  x_hi <- max(c(est$OR_hi, 1)) * 1.3
+  cand <- c(0.001, 0.003, 0.01, 0.03, 0.1, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64, 128)
+  brks <- cand[cand >= x_lo & cand <= x_hi]
+  y_lim <- c(0.5, length(group_levels) + 0.5)
+  ref_df <- data.frame(y = unname(yb[ref_level]), lab = "Reference")
+  p_main <- ggplot(est, aes(y = y, colour = Cohort)) +
+    geom_vline(xintercept = 1, linetype = "dashed", colour = "grey50", linewidth = 0.5) +
+    geom_segment(aes(x = OR_lo, xend = OR_hi, yend = y), linewidth = 0.7) +
+    geom_point(aes(x = OR), shape = 15, size = 2.8) +
+    annotate("point", x = 1, y = unname(yb[ref_level]), shape = 18, size = 3.8, colour = "grey30") +
+    scale_x_log10(limits = c(x_lo, x_hi), breaks = brks,
+                  labels = function(x) sapply(x, function(v) format(v, scientific = FALSE, drop0trailing = TRUE))) +
+    scale_y_continuous(limits = y_lim, breaks = unname(yb), labels = names(yb), expand = c(0, 0)) +
+    scale_colour_manual(values = cohort_cols, breaks = c("MIMIC-IV", "MIMIC-III"), name = NULL) +
+    labs(x = "Adjusted odds ratio (log scale)", y = NULL, title = title_text) +
+    theme_fig
+  #Text columns on the right sharing the y positions of the forest plot
+  text_panel <- function(col, header) {
+    ggplot() +
+      geom_text(data = est, aes(x = 0, y = y, label = .data[[col]], colour = Cohort), size = 3.2) +
+      geom_text(data = ref_df, aes(x = 0, y = y, label = lab), size = 3.2, colour = "grey30") +
+      scale_colour_manual(values = cohort_cols, guide = "none") +
+      scale_y_continuous(limits = y_lim, expand = c(0, 0)) +
+      scale_x_continuous(limits = c(-1, 1)) +
+      labs(title = header) +
+      theme_void(base_size = 11) +
+      theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 10.5))
+  }
+  p_or <- text_panel("or_lab", "Adjusted OR (95% CI)")
+  p_rd <- text_panel("rd_lab", "Adjusted risk difference, % (95% CI)")
+  wrap_elements(full = p_main + p_or + p_rd + plot_layout(widths = c(2.2, 1, 1.2)))
+}
+p_a <- plot_bar(dat_iv, "MIMIC-IV v3.1")
+p_b <- plot_bar(dat_iii, "MIMIC-III CareVue")
+p_c <- plot_forest(res_any, "AKI (any stage)")
+p_d <- plot_forest(res_severe, "Severe AKI (KDIGO stage 2\u20133)")
+#Layout: A and B side by side (shared legend), C and D on separate rows; tags at the top left outside each panel
+row_ab <- (p_a | p_b) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+fig3 <- row_ab / p_c / p_d +
+  plot_layout(heights = c(1.25, 1, 1)) +
+  plot_annotation(tag_levels = "A") &
+  theme(plot.tag = element_text(size = 16, face = "bold"))
+ggsave(file.path(output_dir, "Figure 3.pdf"), fig3, width = 12, height = 14, device = cairo_pdf)
+ggsave(file.path(output_dir, "Figure 3.png"), fig3, width = 12, height = 14, dpi = 600)
+ggsave(file.path(output_dir, "Figure 3.tif"), fig3, width = 12, height = 14, dpi = 600, device = "tiff", compression = "lzw")
+cat("\nSaved: Figure 3.pdf/png/tif\n")
+#Excel sheet 1: AKI incidence, stage distribution and P values vs Normal
+sheet_inc <- inc_all %>%
+  dplyr::mutate(Subtype_Name = as.character(Subtype_Name)) %>%
+  dplyr::left_join(pw_all, by = c("Cohort", "Subtype_Name")) %>%
+  dplyr::mutate(`No AKI, n (%)` = sprintf("%d (%.1f)", n_no, 100 * n_no / N),
+                `KDIGO stage 1, n (%)` = sprintf("%d (%.1f)", n_s1, 100 * n_s1 / N),
+                `KDIGO stage 2-3, n (%)` = sprintf("%d (%.1f)", n_s23, 100 * n_s23 / N),
+                `Any AKI, n/N` = sprintf("%d/%d", n_aki, N),
+                `Any AKI, % (95% CI)` = sprintf("%.1f (%.1f-%.1f)", aki_rate, aki_lo, aki_hi),
+                `Severe AKI, % (95% CI)` = sprintf("%.1f (%.1f-%.1f)", severe_rate, severe_lo, severe_hi),
+                `P vs Normal (unadjusted)` = ifelse(Subtype_Name == ref_level, "Reference", p_text(p_raw)),
+                `P vs Normal (Bonferroni)` = ifelse(Subtype_Name == ref_level, "Reference", p_text(p_bonf)),
+                `Overall P (chi-squared)` = p_text(unname(overall_p[Cohort]))) %>%
+  dplyr::select(Cohort, Subtype = Subtype_Name, N, `No AKI, n (%)`, `KDIGO stage 1, n (%)`, `KDIGO stage 2-3, n (%)`,
+                `Any AKI, n/N`, `Any AKI, % (95% CI)`, `Severe AKI, % (95% CI)`,
+                `P vs Normal (unadjusted)`, `P vs Normal (Bonferroni)`, `Overall P (chi-squared)`)
+#Excel sheet 2: adjusted ORs and adjusted absolute risk differences
+sheet_model <- dplyr::bind_rows(res_any, res_severe) %>%
+  dplyr::mutate(Subtype = factor(Subtype, levels = group_levels),
+                Cohort = factor(Cohort, levels = c("MIMIC-IV", "MIMIC-III"))) %>%
+  dplyr::arrange(Outcome, Cohort, Subtype) %>%
+  dplyr::mutate(`Events/N` = sprintf("%d/%d", Events, N_model),
+                `Adjusted OR (95% CI)` = ifelse(Subtype == ref_level, "Reference", sprintf("%.2f (%.2f-%.2f)", OR, OR_lo, OR_hi)),
+                `P value` = ifelse(Subtype == ref_level, "", p_text(P)),
+                `Adjusted risk, %` = sprintf("%.1f", Risk),
+                `Adjusted risk difference, % (95% CI)` = ifelse(Subtype == ref_level, "Reference", sprintf("%.1f (%.1f to %.1f)", RD, RD_lo, RD_hi)),
+                Covariates = paste(adjust_vars, collapse = ", ")) %>%
+  dplyr::mutate(dplyr::across(c(OR, OR_lo, OR_hi, RD, RD_lo, RD_hi), ~ round(., 3))) %>%
+  dplyr::select(Outcome, Cohort, Method, Subtype, `Events/N`, OR, OR_lo, OR_hi, `Adjusted OR (95% CI)`, `P value`,
+                `Adjusted risk, %`, RD, RD_lo, RD_hi, `Adjusted risk difference, % (95% CI)`,
+                N_total, Boot_success, Covariates)
+wb <- openxlsx::createWorkbook()
+hs <- openxlsx::createStyle(textDecoration = "bold")
+openxlsx::addWorksheet(wb, "AKI incidence")
+openxlsx::writeData(wb, "AKI incidence", sheet_inc, headerStyle = hs)
+openxlsx::setColWidths(wb, "AKI incidence", cols = seq_len(ncol(sheet_inc)), widths = "auto")
+openxlsx::addWorksheet(wb, "Adjusted models")
+openxlsx::writeData(wb, "Adjusted models", sheet_model, headerStyle = hs)
+openxlsx::setColWidths(wb, "Adjusted models", cols = seq_len(ncol(sheet_model)), widths = "auto")
+openxlsx::saveWorkbook(wb, file.path(output_dir, "Figure 3.xlsx"), overwrite = TRUE)
+cat("Saved: Figure 3.xlsx\n")
+print(as.data.frame(sheet_inc))
+print(as.data.frame(sheet_model %>% dplyr::select(-Covariates)))
+
+##Figure 4: timing of AKI onset relative to the platelet nadir##########
+rm(list = ls())
+gc()
+suppressPackageStartupMessages({
+  library(readxl)
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(patchwork)
+  library(survival)
+  library(openxlsx)
+  library(MetBrewer)
+})
+data_dir <- "data"
+output_dir <- "output"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+#Fixed subtype order (high to low)
+group_levels <- c("High", "High-Normal", "Normal", "Low")
+#Column name of the daily platelet count in the long-format data
+platelet_var <- "platelet"
+#Column name of the time of AKI onset (hours since ICU admission)
+aki_onset_var <- "aki_onset_hour"
+#Optional column with the day of AKI onset defined as for the platelet day index; if NA, floor(hours / 24) is used
+aki_onset_day_var <- NA_character_
+#End of the AKI observation window (days), as in the primary outcome definition
+window_end_day <- 7
+#Subtype colours consistent with Figure 2 (High red, High-Normal yellow, Normal green, Low purple)
+subtype_cols <- setNames(MetBrewer::met.brewer("Klimt", 6)[c(2, 3, 4, 6)], group_levels)
+#Nadir-AKI timing categories and colours
+timing_levels <- c("Nadir before AKI onset", "Nadir on the day of AKI onset", "Nadir after AKI onset")
+timing_cols <- setNames(c("#0072B5", "#BFBFBF", "#E18727"), timing_levels)
+timing_txt_cols <- setNames(c("white", "black", "black"), timing_levels)
+#Read long-format data, compute each patient's platelet nadir and its day over days 0-7, and merge the time of AKI onset
+read_cohort <- function(file_name, cohort_name) {
+  d_long <- readxl::read_excel(file.path(data_dir, file_name))
+  need_vars <- c("stay_id", "day", "Subtype_Name", "outcome_aki_7d", platelet_var, aki_onset_var, stats::na.omit(aki_onset_day_var))
+  miss_vars <- setdiff(need_vars, colnames(d_long))
+  if (length(miss_vars) > 0) {
+    cat(cohort_name, "possibly relevant columns:", paste(grep("plt|platelet|aki|onset", colnames(d_long), value = TRUE, ignore.case = TRUE), collapse = ", "), "\n")
+    stop(paste0(cohort_name, " missing variables: ", paste(miss_vars, collapse = ", ")))
+  }
+  #Platelet nadir and its day for each patient (earliest day if tied)
+  nadir_df <- d_long %>%
+    dplyr::filter(day >= 0, day <= window_end_day, !is.na(.data[[platelet_var]])) %>%
+    dplyr::group_by(stay_id) %>%
+    dplyr::summarise(n_days = dplyr::n_distinct(day),
+                     nadir_value = min(.data[[platelet_var]]),
+                     nadir_day = min(day[.data[[platelet_var]] == min(.data[[platelet_var]])]),
+                     .groups = "drop")
+  keep_vars <- as.character(stats::na.omit(c(aki_onset_day_var, "hos_outcome", "hos_los")))
+  base_df <- d_long %>%
+    dplyr::filter(day == 0) %>%
+    dplyr::select(stay_id, Subtype_Name, outcome_aki_7d, dplyr::all_of(aki_onset_var), dplyr::any_of(keep_vars)) %>%
+    dplyr::rename(aki_onset_hour = dplyr::all_of(aki_onset_var)) %>%
+    dplyr::left_join(nadir_df, by = "stay_id") %>%
+    dplyr::filter(!is.na(outcome_aki_7d), !is.na(Subtype_Name)) %>%
+    dplyr::mutate(Cohort = cohort_name,
+                  Subtype_Name = factor(Subtype_Name, levels = group_levels),
+                  aki_onset_hour = ifelse(outcome_aki_7d == 1, aki_onset_hour, NA_real_),
+                  aki_onset_day_cont = aki_onset_hour / 24)
+  if (!is.na(aki_onset_day_var)) base_df$aki_onset_day <- ifelse(base_df$outcome_aki_7d == 1, base_df[[aki_onset_day_var]], NA_real_) else base_df$aki_onset_day <- floor(base_df$aki_onset_hour / 24)
+  #Data checks
+  cat("\n", cohort_name, ":", nrow(base_df), "patients, AKI", sum(base_df$outcome_aki_7d == 1), "\n")
+  cat("Patients and AKI by subtype:\n")
+  print(table(base_df$Subtype_Name, base_df$outcome_aki_7d))
+  cat("Days with a platelet count per patient (should all be", window_end_day + 1, "):\n")
+  print(table(base_df$n_days, useNA = "ifany"))
+  cat("AKI patients with missing onset time:", sum(base_df$outcome_aki_7d == 1 & is.na(base_df$aki_onset_hour)), "\n")
+  cat("Distribution of AKI onset time (hours):\n")
+  print(summary(base_df$aki_onset_hour[base_df$outcome_aki_7d == 1]))
+  cat("AKI onset before 24 h (should be 0):", sum(base_df$aki_onset_hour < 24, na.rm = TRUE), "\n")
+  cat("Distribution of AKI onset day:\n")
+  print(table(base_df$aki_onset_day, useNA = "ifany"))
+  if (all(c("hos_outcome", "hos_los") %in% colnames(base_df))) cat("In-hospital deaths before day", window_end_day, "(should be 0):", sum(base_df$hos_outcome == 1 & base_df$hos_los / 24 < window_end_day, na.rm = TRUE), "\n")
+  base_df
+}
+dat_iv <- read_cohort("mimic4_cohort.xlsx", "MIMIC-IV")
+dat_iii <- read_cohort("mimic3_cohort.xlsx", "MIMIC-III")
+#P value format for figures (plotmath expression, italic P)
+p_expr <- function(p) {
+  if (p < 0.0001) return('paste(italic(P), " < 0.0001")')
+  if (p < 0.001) return(paste0('paste(italic(P), " = ', sprintf("%.4f", p), '")'))
+  paste0('paste(italic(P), " = ', sprintf("%.3f", p), '")')
+}
+#P value format for Excel (plain text)
+p_text <- function(p) {
+  ifelse(is.na(p), "", ifelse(p < 0.0001, "<0.0001", ifelse(p < 0.001, sprintf("%.4f", p), sprintf("%.3f", p))))
+}
+#Median [IQR] format
+med_iqr <- function(x) {
+  x <- x[!is.na(x)]
+  if (length(x) == 0) return("")
+  sprintf("%.1f [%.1f, %.1f]", stats::median(x), stats::quantile(x, 0.25), stats::quantile(x, 0.75))
+}
+#Cumulative incidence of AKI: all patients survived to day 7, so there is no censoring within the window and the cumulative incidence equals cumulative events / total
+calc_cuminc <- function(d) {
+  fu_end <- ceiling(max(c(window_end_day, d$aki_onset_day_cont[d$outcome_aki_7d == 1]), na.rm = TRUE))
+  d <- d %>% dplyr::mutate(time = ifelse(outcome_aki_7d == 1, aki_onset_day_cont, fu_end))
+  n_df <- d %>% dplyr::count(Subtype_Name, name = "N")
+  ev_df <- d %>% dplyr::filter(outcome_aki_7d == 1, !is.na(time)) %>% dplyr::count(Subtype_Name, time, name = "events")
+  curve_df <- ev_df %>%
+    dplyr::left_join(n_df, by = "Subtype_Name") %>%
+    dplyr::group_by(Subtype_Name) %>%
+    dplyr::arrange(time, .by_group = TRUE) %>%
+    dplyr::mutate(cuminc = 100 * cumsum(events) / N) %>%
+    dplyr::ungroup() %>%
+    dplyr::select(Subtype_Name, time, cuminc)
+  end_df <- n_df %>%
+    dplyr::left_join(curve_df %>% dplyr::group_by(Subtype_Name) %>% dplyr::summarise(cuminc = max(cuminc), .groups = "drop"), by = "Subtype_Name") %>%
+    dplyr::mutate(time = fu_end, cuminc = ifelse(is.na(cuminc), 0, cuminc)) %>%
+    dplyr::select(Subtype_Name, time, cuminc)
+  start_df <- n_df %>% dplyr::mutate(time = 1, cuminc = 0) %>% dplyr::select(Subtype_Name, time, cuminc)
+  curve_all <- dplyr::bind_rows(start_df, curve_df, end_df) %>% dplyr::arrange(Subtype_Name, time)
+  #Log-rank test comparing the time to AKI across subtypes
+  lr <- survival::survdiff(survival::Surv(time, outcome_aki_7d) ~ Subtype_Name, data = d %>% dplyr::filter(!is.na(time)))
+  p_lr <- stats::pchisq(lr$chisq, df = length(lr$n) - 1, lower.tail = FALSE)
+  #Daily cumulative incidence (for reporting)
+  daily <- dplyr::bind_rows(lapply(seq_len(fu_end), function(t) {
+    d %>%
+      dplyr::group_by(Subtype_Name) %>%
+      dplyr::summarise(Day = t, N = dplyr::n(), Events = sum(outcome_aki_7d == 1 & time <= t, na.rm = TRUE), .groups = "drop")
+  })) %>%
+    dplyr::mutate(Cuminc = 100 * Events / N)
+  list(curve = curve_all, p = p_lr, daily = daily, fu_end = fu_end)
+}
+#Day of platelet nadir relative to the day of AKI onset (patients with AKI only)
+calc_timing <- function(d) {
+  aki_d <- d %>%
+    dplyr::filter(outcome_aki_7d == 1, !is.na(aki_onset_day), !is.na(nadir_day)) %>%
+    dplyr::mutate(diff_day = aki_onset_day - nadir_day,
+                  Timing = dplyr::case_when(diff_day > 0 ~ timing_levels[1],
+                                            diff_day == 0 ~ timing_levels[2],
+                                            TRUE ~ timing_levels[3]),
+                  Timing = factor(Timing, levels = timing_levels))
+  both <- dplyr::bind_rows(aki_d %>% dplyr::mutate(Group = "All AKI"),
+                           aki_d %>% dplyr::mutate(Group = as.character(Subtype_Name))) %>%
+    dplyr::mutate(Group = factor(Group, levels = c("All AKI", group_levels)))
+  dist_df <- both %>%
+    dplyr::count(Group, Timing, .drop = FALSE) %>%
+    dplyr::group_by(Group) %>%
+    dplyr::mutate(N = sum(n), pct = ifelse(N > 0, 100 * n / N, 0)) %>%
+    dplyr::ungroup()
+  summ_df <- both %>%
+    dplyr::group_by(Group) %>%
+    dplyr::summarise(N_AKI = dplyr::n(),
+                     Nadir_day = med_iqr(nadir_day),
+                     AKI_onset_day = med_iqr(aki_onset_day),
+                     Onset_minus_nadir_day = med_iqr(diff_day),
+                     .groups = "drop")
+  #Comparison of timing distribution across subtypes (Fisher exact test with Monte Carlo simulation when expected counts < 5)
+  p_chi <- tryCatch({
+    tb <- table(droplevels(aki_d$Subtype_Name), aki_d$Timing)
+    ct <- suppressWarnings(stats::chisq.test(tb))
+    if (any(ct$expected < 5)) stats::fisher.test(tb, simulate.p.value = TRUE, B = 2000)$p.value else ct$p.value
+  }, error = function(e) NA_real_)
+  list(dist = dist_df, summ = summ_df, p = p_chi)
+}
+set.seed(2026)
+cum_iv <- calc_cuminc(dat_iv)
+cum_iii <- calc_cuminc(dat_iii)
+tim_iv <- calc_timing(dat_iv)
+tim_iii <- calc_timing(dat_iii)
+cat("\nLog-rank P: MIMIC-IV =", p_text(cum_iv$p), "; MIMIC-III =", p_text(cum_iii$p), "\n")
+cat("\nMIMIC-IV timing distribution:\n")
+print(as.data.frame(tim_iv$dist))
+print(as.data.frame(tim_iv$summ))
+cat("\nMIMIC-III timing distribution:\n")
+print(as.data.frame(tim_iii$dist))
+print(as.data.frame(tim_iii$summ))
+#Common theme: L-shaped black axes, no grid lines, transparent legend background
+theme_fig <- theme_classic(base_size = 11) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 12),
+        axis.title = element_text(face = "bold", colour = "black"),
+        axis.text = element_text(colour = "black", size = 10),
+        axis.line = element_line(colour = "black", linewidth = 0.5),
+        axis.ticks = element_line(colour = "black", linewidth = 0.5),
+        panel.grid = element_blank(),
+        legend.position = "bottom",
+        legend.background = element_blank(),
+        legend.key = element_blank(),
+        legend.text = element_text(size = 10))
+#Common y-axis upper limit for both cohorts
+y_max <- ceiling(max(c(cum_iv$curve$cuminc, cum_iii$curve$cuminc)) / 10) * 10 + 5
+#Panels A and B: step curves of the cumulative incidence of AKI by subtype, log-rank P value at the top left
+plot_cuminc <- function(ci, title_text) {
+  ggplot(ci$curve, aes(x = time, y = cuminc, colour = Subtype_Name)) +
+    geom_step(direction = "hv", linewidth = 0.9) +
+    annotate("text", x = 1.15, y = y_max * 0.95, label = p_expr(ci$p), parse = TRUE, hjust = 0, size = 3.6) +
+    scale_colour_manual(values = subtype_cols, breaks = group_levels, name = NULL) +
+    scale_x_continuous(limits = c(1, ci$fu_end), breaks = seq(1, ci$fu_end, 1), expand = c(0.01, 0)) +
+    scale_y_continuous(limits = c(0, y_max), breaks = seq(0, y_max, 10), expand = c(0, 0)) +
+    labs(x = "Days since ICU admission", y = "Cumulative incidence of AKI (%)", title = title_text) +
+    theme_fig
+}
+#Panels C and D: timing of the platelet nadir relative to AKI onset among patients with AKI (100% stacked bars)
+plot_timing <- function(tm, title_text) {
+  dist_plot <- tm$dist %>%
+    dplyr::mutate(Timing = factor(as.character(Timing), levels = rev(timing_levels)),
+                  txt = ifelse(pct >= 6, sprintf("%.0f%%", pct), ""),
+                  txt_col = unname(timing_txt_cols[as.character(Timing)]))
+  n_df <- tm$dist %>% dplyr::distinct(Group, N)
+  ggplot(dist_plot, aes(x = Group, y = pct, fill = Timing, group = Timing)) +
+    geom_col(width = 0.68, colour = "white", linewidth = 0.3) +
+    geom_text(aes(label = txt, colour = txt_col), position = position_stack(vjust = 0.5), size = 3) +
+    geom_text(data = n_df, aes(x = Group, y = 101.5, label = paste0("n = ", N)), inherit.aes = FALSE, vjust = 0, size = 3.1) +
+    scale_colour_identity() +
+    scale_fill_manual(values = timing_cols, breaks = timing_levels, name = NULL) +
+    scale_y_continuous(limits = c(0, 110), breaks = seq(0, 100, 20), expand = c(0, 0)) +
+    guides(y = guide_axis(cap = "upper"), fill = guide_legend(nrow = 1)) +
+    labs(x = NULL, y = "Proportion of patients with AKI (%)", title = title_text) +
+    theme_fig
+}
+p_a <- plot_cuminc(cum_iv, "MIMIC-IV v3.1")
+p_b <- plot_cuminc(cum_iii, "MIMIC-III CareVue")
+p_c <- plot_timing(tim_iv, "MIMIC-IV v3.1")
+p_d <- plot_timing(tim_iii, "MIMIC-III CareVue")
+#Layout: cumulative incidence on top, timing below, shared legend per row; tags at the top left outside each panel
+row_ab <- (p_a | p_b) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+row_cd <- (p_c | p_d) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+fig4 <- row_ab / row_cd +
+  plot_annotation(tag_levels = "A") &
+  theme(plot.tag = element_text(size = 16, face = "bold"))
+ggsave(file.path(output_dir, "Figure 4.pdf"), fig4, width = 12, height = 10, device = cairo_pdf)
+ggsave(file.path(output_dir, "Figure 4.png"), fig4, width = 12, height = 10, dpi = 600)
+ggsave(file.path(output_dir, "Figure 4.tif"), fig4, width = 12, height = 10, dpi = 600, device = "tiff", compression = "lzw")
+cat("\nSaved: Figure 4.pdf/png/tif\n")
+#Excel sheet 1: daily cumulative incidence of AKI
+sheet_cum <- dplyr::bind_rows(cum_iv$daily %>% dplyr::mutate(Cohort = "MIMIC-IV", LogRank_P = p_text(cum_iv$p)),
+                              cum_iii$daily %>% dplyr::mutate(Cohort = "MIMIC-III", LogRank_P = p_text(cum_iii$p))) %>%
+  dplyr::mutate(Value = sprintf("%d/%d (%.1f%%)", Events, N, Cuminc)) %>%
+  dplyr::select(Cohort, Subtype = Subtype_Name, N, Day, Value, LogRank_P) %>%
+  tidyr::pivot_wider(names_from = Day, values_from = Value, names_prefix = "Cumulative AKI by day ")
+#Excel sheet 2: nadir-AKI timing distribution and medians
+make_timing_sheet <- function(tm, cn) {
+  tm$dist %>%
+    dplyr::mutate(Value = sprintf("%d (%.1f)", n, pct)) %>%
+    dplyr::select(Group, Timing, Value) %>%
+    tidyr::pivot_wider(names_from = Timing, values_from = Value) %>%
+    dplyr::left_join(tm$summ, by = "Group") %>%
+    dplyr::mutate(Cohort = cn, `P across subtypes` = ifelse(Group == "All AKI", p_text(tm$p), "")) %>%
+    dplyr::select(Cohort, Group, N_AKI, dplyr::all_of(timing_levels), Nadir_day, AKI_onset_day, Onset_minus_nadir_day, `P across subtypes`)
+}
+sheet_tim <- dplyr::bind_rows(make_timing_sheet(tim_iv, "MIMIC-IV"), make_timing_sheet(tim_iii, "MIMIC-III"))
+wb <- openxlsx::createWorkbook()
+hs <- openxlsx::createStyle(textDecoration = "bold")
+openxlsx::addWorksheet(wb, "Cumulative AKI")
+openxlsx::writeData(wb, "Cumulative AKI", sheet_cum, headerStyle = hs)
+openxlsx::setColWidths(wb, "Cumulative AKI", cols = seq_len(ncol(sheet_cum)), widths = "auto")
+openxlsx::addWorksheet(wb, "Nadir-AKI timing")
+openxlsx::writeData(wb, "Nadir-AKI timing", sheet_tim, headerStyle = hs)
+openxlsx::setColWidths(wb, "Nadir-AKI timing", cols = seq_len(ncol(sheet_tim)), widths = "auto")
+openxlsx::saveWorkbook(wb, file.path(output_dir, "Figure 4.xlsx"), overwrite = TRUE)
+cat("Saved: Figure 4.xlsx\n")
+print(as.data.frame(sheet_cum))
+print(as.data.frame(sheet_tim))
+##Supplementary Table 5: incremental value of platelet trajectory subtype over the day-0 platelet count##########
+rm(list = ls())
+gc()
+suppressPackageStartupMessages({
+  library(readxl)
+  library(dplyr)
+  library(tidyr)
+  library(splines)
+  library(pROC)
+  library(openxlsx)
+})
+data_dir <- "data"
+output_dir <- "output"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+#Fixed subtype order; Normal is the reference (as in Figure 3)
+group_levels <- c("High", "High-Normal", "Normal", "Low")
+ref_level <- "Normal"
+#Column name of the day-0 platelet count (day == 0 row of the long-format data, the value used for the trajectories)
+platelet_var <- "platelet"
+#Day-0 platelet count modelled with a natural spline with 3 df, matching the 3 df of the subtype variable
+plt_df <- 3
+#Outcome variable
+outcome_var <- "outcome_aki_7d"
+#Covariates identical to Figure 3
+adjust_vars <- c("age", "gender", "bmi", "modified_sofa", "charlson", "baseline_cr",
+                 "itvtn_24h_vent_tag", "drug_24h_vaso_tag", "icd_liver",
+                 "platelet_transfusion", "heparin_use", "nephrotoxic_drugs",
+                 "chemo_heme_malig", "infection_site")
+#Read data, keep day 0 rows, build the model dataset (the four models use the same complete cases)
+read_cohort <- function(file_name, cohort_name) {
+  d <- readxl::read_excel(file.path(data_dir, file_name)) %>% dplyr::filter(day == 0)
+  need_vars <- c("Subtype_Name", outcome_var, platelet_var, adjust_vars)
+  miss_vars <- setdiff(need_vars, colnames(d))
+  if (length(miss_vars) > 0) stop(paste0(cohort_name, " missing variables: ", paste(miss_vars, collapse = ", ")))
+  d <- d %>%
+    dplyr::mutate(Subtype_Model = stats::relevel(factor(as.character(Subtype_Name), levels = group_levels), ref = ref_level),
+                  platelet_d0 = .data[[platelet_var]],
+                  y = .data[[outcome_var]],
+                  infection_site = factor(infection_site)) %>%
+    dplyr::select(y, Subtype_Model, platelet_d0, dplyr::all_of(adjust_vars)) %>%
+    stats::na.omit() %>%
+    as.data.frame()
+  if ("Pulmonary" %in% levels(d$infection_site)) d$infection_site <- stats::relevel(d$infection_site, ref = "Pulmonary")
+  d$infection_site <- droplevels(d$infection_site)
+  #Data checks
+  cat("\n", cohort_name, ": patients in models", nrow(d), ", AKI", sum(d$y == 1), "\n")
+  print(table(d$Subtype_Model, d$y))
+  cat("Median day-0 platelet count by subtype:\n")
+  print(round(tapply(d$platelet_d0, d$Subtype_Model, stats::median), 1))
+  d
+}
+dat_iv <- read_cohort("mimic4_cohort.xlsx", "MIMIC-IV")
+dat_iii <- read_cohort("mimic3_cohort.xlsx", "MIMIC-III")
+#P value format for Excel (plain text)
+p_text <- function(p) {
+  ifelse(is.na(p), "", ifelse(p < 0.0001, "<0.0001", ifelse(p < 0.001, sprintf("%.4f", p), sprintf("%.3f", p))))
+}
+#Continuous NRI and IDI (standard errors by the Pencina method)
+calc_idi_nri <- function(p_old, p_new, y) {
+  e <- y == 1
+  ne <- y == 0
+  dif <- p_new - p_old
+  idi <- mean(dif[e]) - mean(dif[ne])
+  idi_se <- sqrt(stats::var(dif[e]) / sum(e) + stats::var(dif[ne]) / sum(ne))
+  up_e <- mean(dif[e] > 0)
+  down_e <- mean(dif[e] < 0)
+  up_ne <- mean(dif[ne] > 0)
+  down_ne <- mean(dif[ne] < 0)
+  nri <- (up_e - down_e) + (down_ne - up_ne)
+  nri_se <- sqrt((up_e + down_e - (up_e - down_e)^2) / sum(e) + (up_ne + down_ne - (down_ne - up_ne)^2) / sum(ne))
+  data.frame(NRI = nri, NRI_lo = nri - 1.96 * nri_se, NRI_hi = nri + 1.96 * nri_se, NRI_P = 2 * stats::pnorm(-abs(nri / nri_se)),
+             IDI = idi, IDI_lo = idi - 1.96 * idi_se, IDI_hi = idi + 1.96 * idi_se, IDI_P = 2 * stats::pnorm(-abs(idi / idi_se)))
+}
+#Fit and compare four nested models
+run_cohort <- function(d, cohort_name) {
+  cov_str <- paste(adjust_vars, collapse = " + ")
+  plt_str <- sprintf("splines::ns(platelet_d0, df = %d)", plt_df)
+  forms <- c("Model 1" = paste("y ~", cov_str),
+             "Model 2" = paste("y ~", cov_str, "+", plt_str),
+             "Model 3" = paste("y ~", cov_str, "+ Subtype_Model"),
+             "Model 4" = paste("y ~", cov_str, "+", plt_str, "+ Subtype_Model"))
+  model_desc <- c("Model 1" = "Covariates",
+                  "Model 2" = "Covariates + day-0 platelet count",
+                  "Model 3" = "Covariates + trajectory subtype",
+                  "Model 4" = "Covariates + day-0 platelet count + trajectory subtype")
+  fits <- lapply(forms, function(f) stats::glm(stats::as.formula(f), data = d, family = stats::binomial()))
+  preds <- lapply(fits, stats::fitted)
+  rocs <- lapply(preds, function(p) pROC::roc(d$y, p, levels = c(0, 1), direction = "<", quiet = TRUE))
+  #Discrimination, AIC and Brier score of each model
+  model_tab <- dplyr::bind_rows(lapply(names(fits), function(m) {
+    ci <- as.numeric(pROC::ci.auc(rocs[[m]], method = "delong"))
+    data.frame(Cohort = cohort_name, Model = m, Description = unname(model_desc[m]), N = nrow(d), Events = sum(d$y == 1),
+               AUC = ci[2], AUC_lo = ci[1], AUC_hi = ci[3], AIC = stats::AIC(fits[[m]]), Brier = mean((preds[[m]] - d$y)^2))
+  }))
+  #Pairwise model comparisons: DeLong test, likelihood ratio test, NRI and IDI
+  comp_list <- list(c(1, 2), c(1, 3), c(2, 4), c(3, 4))
+  comp_desc <- c("Day-0 platelet count added to covariates",
+                 "Trajectory subtype added to covariates",
+                 "Trajectory subtype added to day-0 platelet count",
+                 "Day-0 platelet count added to trajectory subtype")
+  comp_tab <- dplyr::bind_rows(lapply(seq_along(comp_list), function(k) {
+    m_old <- names(fits)[comp_list[[k]][1]]
+    m_new <- names(fits)[comp_list[[k]][2]]
+    rt <- pROC::roc.test(rocs[[m_new]], rocs[[m_old]], method = "delong", paired = TRUE)
+    d_ci <- if (!is.null(rt$conf.int)) as.numeric(rt$conf.int) else c(NA_real_, NA_real_)
+    lr <- stats::anova(fits[[m_old]], fits[[m_new]], test = "LRT")
+    cbind(data.frame(Cohort = cohort_name, Comparison = paste(m_new, "vs", m_old), Description = comp_desc[k],
+                     Delta_AUC = as.numeric(pROC::auc(rocs[[m_new]])) - as.numeric(pROC::auc(rocs[[m_old]])),
+                     dAUC_lo = d_ci[1], dAUC_hi = d_ci[2], DeLong_P = rt$p.value,
+                     LR_chisq = lr$Deviance[2], LR_df = lr$Df[2], LR_P = lr$`Pr(>Chi)`[2]),
+          calc_idi_nri(preds[[m_old]], preds[[m_new]], d$y))
+  }))
+  #Subtype ORs in Models 3 and 4 (Model 4 adjusts for the day-0 platelet count)
+  or_tab <- dplyr::bind_rows(lapply(c("Model 3", "Model 4"), function(m) {
+    f <- fits[[m]]
+    b <- stats::coef(f)
+    idx <- grep("^Subtype_Model", names(b))
+    ci <- tryCatch(suppressMessages(stats::confint(f, parm = names(b)[idx])),
+                   error = function(e) stats::confint.default(f, parm = names(b)[idx]))
+    data.frame(Cohort = cohort_name, Model = m, Description = unname(model_desc[m]),
+               Subtype = sub("^Subtype_Model", "", names(b)[idx]),
+               OR = exp(b[idx]), OR_lo = exp(ci[, 1]), OR_hi = exp(ci[, 2]),
+               P = summary(f)$coefficients[idx, 4])
+  }))
+  list(model = model_tab, comp = comp_tab, or = or_tab)
+}
+res_iv <- run_cohort(dat_iv, "MIMIC-IV")
+res_iii <- run_cohort(dat_iii, "MIMIC-III")
+model_all <- dplyr::bind_rows(res_iv$model, res_iii$model)
+comp_all <- dplyr::bind_rows(res_iv$comp, res_iii$comp)
+or_all <- dplyr::bind_rows(res_iv$or, res_iii$or)
+cat("\nModel performance:\n")
+print(model_all)
+cat("\nModel comparisons:\n")
+print(comp_all)
+cat("\nSubtype ORs (Model 3 should match Figure 3; Model 4 adjusted for the day-0 platelet count):\n")
+print(or_all)
+#Excel sheet 1: model performance
+sheet_model <- model_all %>%
+  dplyr::mutate(`Events/N` = sprintf("%d/%d", Events, N),
+                `AUC (95% CI)` = sprintf("%.3f (%.3f-%.3f)", AUC, AUC_lo, AUC_hi),
+                AIC = sprintf("%.1f", AIC),
+                `Brier score` = sprintf("%.4f", Brier)) %>%
+  dplyr::select(Cohort, Model, Description, `Events/N`, `AUC (95% CI)`, AIC, `Brier score`)
+#Excel sheet 2: model comparisons
+sheet_comp <- comp_all %>%
+  dplyr::mutate(`Delta AUC (95% CI)` = ifelse(is.na(dAUC_lo), sprintf("%.3f", Delta_AUC), sprintf("%.3f (%.3f to %.3f)", Delta_AUC, dAUC_lo, dAUC_hi)),
+                `DeLong P` = p_text(DeLong_P),
+                `LR test` = sprintf("chi2 = %.2f, df = %d", LR_chisq, as.integer(LR_df)),
+                `LR P` = p_text(LR_P),
+                `Continuous NRI (95% CI)` = sprintf("%.3f (%.3f to %.3f)", NRI, NRI_lo, NRI_hi),
+                `NRI P` = p_text(NRI_P),
+                `IDI (95% CI)` = sprintf("%.4f (%.4f to %.4f)", IDI, IDI_lo, IDI_hi),
+                `IDI P` = p_text(IDI_P)) %>%
+  dplyr::select(Cohort, Comparison, Description, `Delta AUC (95% CI)`, `DeLong P`, `LR test`, `LR P`,
+                `Continuous NRI (95% CI)`, `NRI P`, `IDI (95% CI)`, `IDI P`)
+#Excel sheet 3: subtype ORs
+sheet_or <- or_all %>%
+  dplyr::mutate(Subtype = factor(Subtype, levels = group_levels)) %>%
+  dplyr::arrange(Cohort != "MIMIC-IV", Model, Subtype) %>%
+  dplyr::mutate(`OR (95% CI)` = sprintf("%.2f (%.2f-%.2f)", OR, OR_lo, OR_hi), `P value` = p_text(P)) %>%
+  dplyr::select(Cohort, Model, Description, Subtype, `OR (95% CI)`, `P value`)
+wb <- openxlsx::createWorkbook()
+hs <- openxlsx::createStyle(textDecoration = "bold")
+for (sh in list(list("Model performance", sheet_model), list("Model comparison", sheet_comp), list("Subtype OR", sheet_or))) {
+  openxlsx::addWorksheet(wb, sh[[1]])
+  openxlsx::writeData(wb, sh[[1]], sh[[2]], headerStyle = hs)
+  openxlsx::setColWidths(wb, sh[[1]], cols = seq_len(ncol(sh[[2]])), widths = "auto")
+}
+openxlsx::saveWorkbook(wb, file.path(output_dir, "SuppTable5_incremental_value.xlsx"), overwrite = TRUE)
+cat("\nSaved: SuppTable5_incremental_value.xlsx\n")
+print(as.data.frame(sheet_model))
+print(as.data.frame(sheet_comp))
+print(as.data.frame(sheet_or))
+##Figure 5 and Supplementary Table 6: mortality from a day-7 landmark (competing risks for in-hospital death; 28-day and 1-year mortality)##########
+rm(list = ls())
+gc()
+suppressPackageStartupMessages({
+  library(readxl)
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(patchwork)
+  library(survival)
+  library(cmprsk)
+  library(openxlsx)
+  library(MetBrewer)
+})
+data_dir <- "data"
+output_dir <- "output"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+#Fixed subtype order; Normal is the reference (as in Figure 3)
+group_levels <- c("High", "High-Normal", "Normal", "Low")
+ref_level <- "Normal"
+#Landmark (days): all included patients were alive on day 7, and follow-up starts on day 7
+landmark_day <- 7
+#Time variables in the source data are in hours
+time_unit_hours <- 24
+#Upper x-axis limit for in-hospital mortality curves (days since ICU admission); affects plotting only
+hosp_xmax <- 60
+#Covariates identical to Figure 3 (AKI is downstream of the exposure and is not adjusted for)
+adjust_vars <- c("age", "gender", "bmi", "modified_sofa", "charlson", "baseline_cr",
+                 "itvtn_24h_vent_tag", "drug_24h_vaso_tag", "icd_liver",
+                 "platelet_transfusion", "heparin_use", "nephrotoxic_drugs",
+                 "chemo_heme_malig", "infection_site")
+#Subtype colours consistent with Figure 2
+subtype_cols <- setNames(MetBrewer::met.brewer("Klimt", 6)[c(2, 3, 4, 6)], group_levels)
+#Three mortality outcomes: in-hospital death with discharge alive as a competing event; 28-day and 1-year mortality with landmark Kaplan-Meier and Cox models
+outcome_list <- list(
+  list(key = "hosp", status = "hos_outcome", time = "hos_los", label = "In-hospital mortality",
+       ylab = "Cumulative incidence of in-hospital death (%)", xmax = hosp_xmax, breaks = c(7, seq(14, hosp_xmax, 14))),
+  list(key = "d28", status = "day28_outcome", time = "day28_los", label = "28-day mortality",
+       ylab = "Cumulative mortality (%)", xmax = 28, breaks = c(7, 14, 21, 28)),
+  list(key = "y1", status = "year1_outcome", time = "year1_los", label = "1-year mortality",
+       ylab = "Cumulative mortality (%)", xmax = 365, breaks = c(7, 90, 180, 270, 365))
+)
+#Read data, keep day 0 rows, check events before the landmark
+read_cohort <- function(file_name, cohort_name) {
+  d <- readxl::read_excel(file.path(data_dir, file_name)) %>% dplyr::filter(day == 0)
+  surv_vars <- c("hos_outcome", "hos_los", "day28_outcome", "day28_los", "year1_outcome", "year1_los")
+  need_vars <- c("Subtype_Name", surv_vars, adjust_vars)
+  miss_vars <- setdiff(need_vars, colnames(d))
+  if (length(miss_vars) > 0) stop(paste0(cohort_name, " missing variables: ", paste(miss_vars, collapse = ", ")))
+  d <- d %>%
+    dplyr::filter(!is.na(Subtype_Name)) %>%
+    dplyr::mutate(Cohort = cohort_name,
+                  Subtype_Name = factor(Subtype_Name, levels = group_levels),
+                  Subtype_Model = stats::relevel(factor(as.character(Subtype_Name), levels = group_levels), ref = ref_level),
+                  infection_site = factor(infection_site))
+  if ("Pulmonary" %in% levels(d$infection_site)) d$infection_site <- stats::relevel(d$infection_site, ref = "Pulmonary")
+  cat("\n", cohort_name, ":", nrow(d), "patients\n")
+  for (o in outcome_list) {
+    t_day <- d[[o$time]] / time_unit_hours
+    cat(o$label, ": events", sum(d[[o$status]] == 1, na.rm = TRUE), "; events before landmark (should be 0)",
+        sum(d[[o$status]] == 1 & t_day < landmark_day, na.rm = TRUE), "; follow-up ended before landmark",
+        sum(t_day < landmark_day, na.rm = TRUE), "; missing time or outcome", sum(is.na(t_day) | is.na(d[[o$status]])), "\n")
+  }
+  cat("In-hospital deaths by subtype (total should match the included group in Supplementary Table 1):\n")
+  print(table(d$Subtype_Name, d$hos_outcome, useNA = "ifany"))
+  d
+}
+dat_iv <- read_cohort("mimic4_cohort.xlsx", "MIMIC-IV")
+dat_iii <- read_cohort("mimic3_cohort.xlsx", "MIMIC-III")
+#P value format for figures (plotmath expression, italic P)
+p_expr <- function(p) {
+  if (p < 0.0001) return('paste(italic(P), " < 0.0001")')
+  if (p < 0.001) return(paste0('paste(italic(P), " = ', sprintf("%.4f", p), '")'))
+  paste0('paste(italic(P), " = ', sprintf("%.3f", p), '")')
+}
+#P value format for Excel (plain text)
+p_text <- function(p) {
+  ifelse(is.na(p), "", ifelse(p < 0.0001, "<0.0001", ifelse(p < 0.001, sprintf("%.4f", p), sprintf("%.3f", p))))
+}
+#Landmark data: keep patients still under follow-up on day 7, with time counted from day 7
+prep_outcome <- function(d, o) {
+  d %>%
+    dplyr::mutate(t_day = .data[[o$time]] / time_unit_hours, status = .data[[o$status]]) %>%
+    dplyr::filter(!is.na(t_day), !is.na(status), t_day >= landmark_day) %>%
+    dplyr::mutate(time_lm = pmax(t_day - landmark_day, 1 / time_unit_hours))
+}
+#Value of a step curve at a given time
+est_at <- function(curve, g, t) {
+  x <- curve$est[curve$Subtype_Name == g & curve$time <= t]
+  if (length(x) == 0) 0 else utils::tail(x, 1)
+}
+#Cumulative incidence curves, group comparison and numbers at risk
+calc_curve <- function(dd, o) {
+  if (o$key == "hosp") {
+    #In-hospital death: Aalen-Johansen cumulative incidence (discharge alive as competing event), Gray test
+    dd$event_f <- factor(ifelse(dd$status == 1, "death", "discharge"), levels = c("censor", "death", "discharge"))
+    fit <- survival::survfit(survival::Surv(time_lm, event_f) ~ Subtype_Name, data = dd)
+    est <- fit$pstate[, match("death", fit$states)]
+    gt <- cmprsk::cuminc(ftime = dd$time_lm, fstatus = as.integer(dd$event_f) - 1, group = dd$Subtype_Name, cencode = 0)
+    p <- gt$Tests["1", "pv"]
+    test_name <- "Gray's test"
+  } else {
+    #28-day and 1-year mortality: Kaplan-Meier cumulative mortality, log-rank test
+    fit <- survival::survfit(survival::Surv(time_lm, status) ~ Subtype_Name, data = dd)
+    est <- 1 - fit$surv
+    lr <- survival::survdiff(survival::Surv(time_lm, status) ~ Subtype_Name, data = dd)
+    p <- stats::pchisq(lr$chisq, df = length(lr$n) - 1, lower.tail = FALSE)
+    test_name <- "Log-rank test"
+  }
+  st <- rep(sub("^Subtype_Name=", "", names(fit$strata)), fit$strata)
+  curve <- dplyr::bind_rows(data.frame(Subtype_Name = levels(droplevels(dd$Subtype_Name)), time = landmark_day, est = 0),
+                            data.frame(Subtype_Name = st, time = fit$time + landmark_day, est = 100 * est)) %>%
+    dplyr::mutate(Subtype_Name = factor(Subtype_Name, levels = group_levels)) %>%
+    dplyr::arrange(Subtype_Name, time)
+  #Number at risk: patients still under follow-up at time t (no event and not censored)
+  risk <- tidyr::expand_grid(Subtype_Name = factor(group_levels, levels = group_levels), time = o$breaks)
+  risk$n <- mapply(function(g, t) sum(dd$Subtype_Name == g & dd$time_lm + landmark_day >= t), as.character(risk$Subtype_Name), risk$time)
+  risk$est <- mapply(function(g, t) est_at(curve, g, t), as.character(risk$Subtype_Name), risk$time)
+  list(curve = curve, risk = risk, p = p, test = test_name)
+}
+#Crude and adjusted HRs: Fine-Gray subdistribution hazard model for in-hospital death; landmark Cox models for 28-day and 1-year mortality
+fit_models <- function(dd, o) {
+  cov_str <- paste(adjust_vars, collapse = " + ")
+  mdat <- dd %>%
+    dplyr::select(time_lm, status, Subtype_Model, dplyr::all_of(adjust_vars)) %>%
+    stats::na.omit() %>%
+    as.data.frame()
+  mdat$infection_site <- droplevels(mdat$infection_site)
+  extract_hr <- function(fit) {
+    s <- summary(fit)
+    idx <- grep("^Subtype_Model", rownames(s$coefficients))
+    data.frame(Subtype = sub("^Subtype_Model", "", rownames(s$coefficients)[idx]),
+               HR = s$conf.int[idx, "exp(coef)"], HR_lo = s$conf.int[idx, "lower .95"], HR_hi = s$conf.int[idx, "upper .95"],
+               P = s$coefficients[idx, ncol(s$coefficients)])
+  }
+  if (o$key == "hosp") {
+    mdat$event_f <- factor(ifelse(mdat$status == 1, "death", "discharge"), levels = c("censor", "death", "discharge"))
+    fg_c <- survival::finegray(survival::Surv(time_lm, event_f) ~ Subtype_Model, data = mdat, etype = "death")
+    fit_c <- survival::coxph(survival::Surv(fgstart, fgstop, fgstatus) ~ Subtype_Model, weights = fgwt, data = fg_c)
+    fg_a <- survival::finegray(stats::as.formula(paste("survival::Surv(time_lm, event_f) ~ Subtype_Model +", cov_str)), data = mdat, etype = "death")
+    fit_a <- survival::coxph(stats::as.formula(paste("survival::Surv(fgstart, fgstop, fgstatus) ~ Subtype_Model +", cov_str)), weights = fgwt, data = fg_a)
+    method <- "Fine-Gray subdistribution hazard model"
+    ph_sub <- NA_real_
+    ph_glob <- NA_real_
+  } else {
+    fit_c <- survival::coxph(survival::Surv(time_lm, status) ~ Subtype_Model, data = mdat)
+    fit_a <- survival::coxph(stats::as.formula(paste("survival::Surv(time_lm, status) ~ Subtype_Model +", cov_str)), data = mdat)
+    method <- "Landmark Cox proportional hazards model"
+    zph <- tryCatch(survival::cox.zph(fit_a)$table, error = function(e) NULL)
+    ph_sub <- if (!is.null(zph)) zph["Subtype_Model", "p"] else NA_real_
+    ph_glob <- if (!is.null(zph)) zph["GLOBAL", "p"] else NA_real_
+  }
+  hr_c <- extract_hr(fit_c) %>% dplyr::rename(cHR = HR, cHR_lo = HR_lo, cHR_hi = HR_hi, cP = P)
+  hr_a <- extract_hr(fit_a) %>% dplyr::rename(aHR = HR, aHR_lo = HR_lo, aHR_hi = HR_hi, aP = P)
+  ev <- mdat %>%
+    dplyr::group_by(Subtype = as.character(Subtype_Model)) %>%
+    dplyr::summarise(N = dplyr::n(), Events = sum(status == 1), .groups = "drop")
+  data.frame(Subtype = group_levels) %>%
+    dplyr::left_join(ev, by = "Subtype") %>%
+    dplyr::left_join(hr_c, by = "Subtype") %>%
+    dplyr::left_join(hr_a, by = "Subtype") %>%
+    dplyr::mutate(Method = method, PH_subtype_P = ph_sub, PH_global_P = ph_glob, N_model = nrow(mdat))
+}
+#Common theme: L-shaped black axes, no grid lines, transparent legend background
+theme_fig <- theme_classic(base_size = 11) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 11.5),
+        axis.title = element_text(face = "bold", colour = "black"),
+        axis.text = element_text(colour = "black", size = 9.5),
+        axis.line = element_line(colour = "black", linewidth = 0.5),
+        axis.ticks = element_line(colour = "black", linewidth = 0.5),
+        panel.grid = element_blank(),
+        legend.background = element_blank(),
+        legend.key = element_blank())
+#Single panel: cumulative curves on top (legend top left, P value top right) and number-at-risk table below
+plot_panel <- function(cv, o, title_text) {
+  y_top <- max(cv$curve$est[cv$curve$time <= o$xmax])
+  y_max <- max(10, ceiling(y_top * 1.4 / 10) * 10)
+  p_curve <- ggplot(cv$curve, aes(x = time, y = est, colour = Subtype_Name)) +
+    geom_step(direction = "hv", linewidth = 0.85) +
+    annotate("text", x = o$xmax, y = y_max * 0.97, label = p_expr(cv$p), parse = TRUE, hjust = 1, vjust = 1, size = 3.4) +
+    scale_colour_manual(values = subtype_cols, breaks = group_levels, name = NULL, drop = FALSE) +
+    scale_x_continuous(breaks = o$breaks) +
+    scale_y_continuous(breaks = seq(0, y_max, by = ifelse(y_max > 40, 10, 5))) +
+    coord_cartesian(xlim = c(landmark_day, o$xmax), ylim = c(0, y_max), expand = FALSE, clip = "off") +
+    labs(x = "Days since ICU admission", y = o$ylab, title = title_text) +
+    theme_fig +
+    theme(legend.position = "inside", legend.position.inside = c(0.02, 0.98), legend.justification = c(0, 1),
+          legend.key.height = unit(0.38, "cm"), legend.text = element_text(size = 9))
+  p_risk <- ggplot(cv$risk, aes(x = time, y = Subtype_Name, label = n, colour = Subtype_Name)) +
+    geom_text(size = 3) +
+    scale_colour_manual(values = subtype_cols, guide = "none") +
+    scale_y_discrete(limits = rev(group_levels)) +
+    scale_x_continuous(breaks = o$breaks) +
+    coord_cartesian(xlim = c(landmark_day, o$xmax), expand = FALSE, clip = "off") +
+    labs(x = NULL, y = NULL, title = "Number at risk") +
+    theme_classic(base_size = 10) +
+    theme(axis.line = element_blank(), axis.ticks = element_blank(), axis.text.x = element_blank(),
+          axis.text.y = element_text(colour = "black", size = 9), panel.grid = element_blank(),
+          plot.title = element_text(size = 9.5, face = "bold", hjust = 0))
+  wrap_elements(full = p_curve / p_risk + plot_layout(heights = c(3.4, 1)))
+}
+#Run all outcomes in both cohorts
+cohort_list <- list("MIMIC-IV" = dat_iv, "MIMIC-III" = dat_iii)
+cohort_title <- c("MIMIC-IV" = "MIMIC-IV v3.1", "MIMIC-III" = "MIMIC-III CareVue")
+panel_list <- list()
+res_list <- list()
+fig_data <- list()
+for (cn in names(cohort_list)) {
+  for (o in outcome_list) {
+    dd <- prep_outcome(cohort_list[[cn]], o)
+    cat("\n", cn, "-", o$label, ": patients at landmark", nrow(dd), "\n")
+    print(table(dd$Subtype_Name, dd$status))
+    cv <- calc_curve(dd, o)
+    panel_list[[length(panel_list) + 1]] <- plot_panel(cv, o, paste0(cohort_title[cn], ": ", tolower(substr(o$label, 1, 1)), substr(o$label, 2, nchar(o$label))))
+    end_t <- ifelse(o$key == "hosp", Inf, o$xmax)
+    ci_end <- sapply(group_levels, function(g) est_at(cv$curve, g, end_t))
+    res_list[[length(res_list) + 1]] <- fit_models(dd, o) %>%
+      dplyr::mutate(Cohort = cn, Outcome = o$label, Cuminc_end = unname(ci_end[Subtype]), Test = cv$test, Test_P = cv$p)
+    fig_data[[length(fig_data) + 1]] <- cv$risk %>% dplyr::mutate(Cohort = cn, Outcome = o$label, Test = cv$test, Test_P = p_text(cv$p))
+  }
+}
+res_all <- dplyr::bind_rows(res_list)
+cat("\nMortality model results:\n")
+print(res_all)
+#Layout: MIMIC-IV on top (A-C), MIMIC-III below (D-F); tags at the top left outside each panel
+fig5 <- wrap_plots(panel_list, ncol = 3) +
+  plot_annotation(tag_levels = "A") &
+  theme(plot.tag = element_text(size = 16, face = "bold"))
+ggsave(file.path(output_dir, "Figure 5.pdf"), fig5, width = 18, height = 12, device = cairo_pdf)
+ggsave(file.path(output_dir, "Figure 5.png"), fig5, width = 18, height = 12, dpi = 600)
+ggsave(file.path(output_dir, "Figure 5.tif"), fig5, width = 18, height = 12, dpi = 600, device = "tiff", compression = "lzw")
+cat("\nSaved: Figure 5.pdf/png/tif\n")
+#Excel sheet 1: Supplementary Table 6 (crude and adjusted HRs)
+sheet_s6 <- res_all %>%
+  dplyr::mutate(Subtype = factor(Subtype, levels = group_levels),
+                Cohort = factor(Cohort, levels = c("MIMIC-IV", "MIMIC-III")),
+                Outcome = factor(Outcome, levels = sapply(outcome_list, function(o) o$label))) %>%
+  dplyr::arrange(Cohort, Outcome, Subtype) %>%
+  dplyr::mutate(`Events/N` = sprintf("%d/%d", Events, N),
+                `Cumulative incidence, %` = sprintf("%.1f", Cuminc_end),
+                `Crude HR (95% CI)` = ifelse(Subtype == ref_level, "Reference", sprintf("%.2f (%.2f-%.2f)", cHR, cHR_lo, cHR_hi)),
+                `Crude P` = ifelse(Subtype == ref_level, "", p_text(cP)),
+                `Adjusted HR (95% CI)` = ifelse(Subtype == ref_level, "Reference", sprintf("%.2f (%.2f-%.2f)", aHR, aHR_lo, aHR_hi)),
+                `Adjusted P` = ifelse(Subtype == ref_level, "", p_text(aP)),
+                `Group comparison P` = ifelse(Subtype == group_levels[1], paste0(Test, ": ", p_text(Test_P)), ""),
+                `PH test P (subtype / global)` = ifelse(Subtype == group_levels[1] & !is.na(PH_global_P), paste0(p_text(PH_subtype_P), " / ", p_text(PH_global_P)), "")) %>%
+  dplyr::select(Cohort, Outcome, Method, Subtype, `Events/N`, `Cumulative incidence, %`, `Crude HR (95% CI)`, `Crude P`,
+                `Adjusted HR (95% CI)`, `Adjusted P`, `Group comparison P`, `PH test P (subtype / global)`)
+#Excel sheet 2: cumulative incidence and numbers at risk at each time point of Figure 5
+sheet_fig <- dplyr::bind_rows(fig_data) %>%
+  dplyr::mutate(Value = sprintf("%.1f%% (at risk %d)", est, n)) %>%
+  dplyr::select(Cohort, Outcome, Test, Test_P, Subtype = Subtype_Name, time, Value) %>%
+  tidyr::pivot_wider(names_from = time, values_from = Value, names_prefix = "Day ")
+wb <- openxlsx::createWorkbook()
+hs <- openxlsx::createStyle(textDecoration = "bold")
+openxlsx::addWorksheet(wb, "Supplementary Table 6")
+openxlsx::writeData(wb, "Supplementary Table 6", sheet_s6, headerStyle = hs)
+openxlsx::setColWidths(wb, "Supplementary Table 6", cols = seq_len(ncol(sheet_s6)), widths = "auto")
+openxlsx::addWorksheet(wb, "Figure 5 data")
+openxlsx::writeData(wb, "Figure 5 data", sheet_fig, headerStyle = hs)
+openxlsx::setColWidths(wb, "Figure 5 data", cols = seq_len(ncol(sheet_fig)), widths = "auto")
+openxlsx::saveWorkbook(wb, file.path(output_dir, "Figure 5_Supplementary Table 6.xlsx"), overwrite = TRUE)
+cat("Saved: Figure 5_Supplementary Table 6.xlsx\n")
+print(as.data.frame(sheet_s6))
+print(as.data.frame(sheet_fig))
+##Supplementary Table 7: subgroup analyses of the association between platelet trajectory subtypes and AKI##########
+rm(list = ls())
+gc()
+suppressPackageStartupMessages({
+  library(readxl)
+  library(dplyr)
+  library(tidyr)
+  library(logistf)
+  library(openxlsx)
+})
+data_dir <- "data"
+output_dir <- "output"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+#Fixed subtype order; Normal is the reference (as in Figure 3)
+group_levels <- c("High", "High-Normal", "Normal", "Low")
+ref_level <- "Normal"
+#Outcome variable
+outcome_var <- "outcome_aki_7d"
+#Covariates identical to Figure 3
+adjust_vars <- c("age", "gender", "bmi", "modified_sofa", "charlson", "baseline_cr",
+                 "itvtn_24h_vent_tag", "drug_24h_vaso_tag", "icd_liver",
+                 "platelet_transfusion", "heparin_use", "nephrotoxic_drugs",
+                 "chemo_heme_malig", "infection_site")
+#Use Firth penalized logistic regression when any subtype has fewer patients with or without AKI than this value within a stratum
+firth_cut <- 5
+#Read MIMIC-IV data, keep day 0 rows
+d <- readxl::read_excel(file.path(data_dir, "mimic4_cohort.xlsx")) %>% dplyr::filter(day == 0)
+miss_vars <- setdiff(c("Subtype_Name", outcome_var, adjust_vars), colnames(d))
+if (length(miss_vars) > 0) stop(paste0("Missing variables: ", paste(miss_vars, collapse = ", ")))
+has_ss <- "icd_ss" %in% colnames(d)
+if (!has_ss) cat("icd_ss not found; septic shock subgroup skipped\n")
+#Modified SOFA split at the median (modified SOFA used instead of total SOFA to avoid overlap with the platelet exposure)
+msofa_cut <- stats::median(d$modified_sofa, na.rm = TRUE)
+cat("Median modified SOFA (subgroup cut-off):", msofa_cut, "\n")
+#Build the analysis dataset and subgroup variables
+d <- d %>%
+  dplyr::mutate(y = .data[[outcome_var]],
+                Subtype_Model = stats::relevel(factor(as.character(Subtype_Name), levels = group_levels), ref = ref_level),
+                infection_site = factor(infection_site),
+                age_group = factor(ifelse(age < 65, "<65 years", "\u226565 years"), levels = c("<65 years", "\u226565 years")),
+                sex_group = factor(ifelse(gender == 1, "Male", "Female"), levels = c("Male", "Female")),
+                msofa_group = factor(ifelse(modified_sofa < msofa_cut, sprintf("<%g", msofa_cut), sprintf("\u2265%g", msofa_cut)),
+                                     levels = c(sprintf("<%g", msofa_cut), sprintf("\u2265%g", msofa_cut))),
+                cr_group = factor(ifelse(baseline_cr < 1.2, "<1.2 mg/dL", "\u22651.2 mg/dL"), levels = c("<1.2 mg/dL", "\u22651.2 mg/dL")),
+                charlson_group = factor(ifelse(charlson < 5, "<5", "\u22655"), levels = c("<5", "\u22655")),
+                vent_group = factor(ifelse(itvtn_24h_vent_tag == 1, "Yes", "No"), levels = c("No", "Yes")),
+                vaso_group = factor(ifelse(drug_24h_vaso_tag == 1, "Yes", "No"), levels = c("No", "Yes")))
+if (has_ss) d$ss_group <- factor(ifelse(d$icd_ss == 1, "Yes", "No"), levels = c("No", "Yes"))
+if ("Pulmonary" %in% levels(d$infection_site)) d$infection_site <- stats::relevel(d$infection_site, ref = "Pulmonary")
+d <- d %>%
+  dplyr::select(y, Subtype_Model, dplyr::all_of(adjust_vars), dplyr::ends_with("_group")) %>%
+  stats::na.omit() %>%
+  as.data.frame()
+cat("Patients in models:", nrow(d), ", AKI", sum(d$y == 1), "\n")
+#Subgroup definitions: the covariate corresponding to the stratification variable is removed
+subgroup_defs <- list(
+  list(var = "age_group", label = "Age", drop = "age"),
+  list(var = "sex_group", label = "Sex", drop = "gender"),
+  list(var = "ss_group", label = "Septic shock", drop = character(0)),
+  list(var = "msofa_group", label = "Modified SOFA score", drop = "modified_sofa"),
+  list(var = "cr_group", label = "Baseline creatinine", drop = "baseline_cr"),
+  list(var = "charlson_group", label = "Charlson index", drop = "charlson"),
+  list(var = "vent_group", label = "Mechanical ventilation", drop = "itvtn_24h_vent_tag"),
+  list(var = "vaso_group", label = "Vasopressor use", drop = "drug_24h_vaso_tag")
+)
+if (!has_ss) subgroup_defs <- Filter(function(s) s$var != "ss_group", subgroup_defs)
+#P value format for Excel (plain text)
+p_text <- function(p) {
+  ifelse(is.na(p), "", ifelse(p < 0.0001, "<0.0001", ifelse(p < 0.001, sprintf("%.4f", p), sprintf("%.3f", p))))
+}
+#Stratum model: returns patients, events and ORs by subtype (Firth regression in sparse strata)
+fit_stratum <- function(dd, covs, sg_label, level_label) {
+  dd$infection_site <- droplevels(dd$infection_site)
+  covs_use <- covs[sapply(covs, function(v) length(unique(dd[[v]])) > 1)]
+  form <- stats::as.formula(paste("y ~ Subtype_Model +", paste(covs_use, collapse = " + ")))
+  cell <- table(dd$Subtype_Model, dd$y)
+  use_firth <- any(cell < firth_cut)
+  if (use_firth) {
+    fit <- logistf::logistf(form, data = dd, plconf = 2:4)
+    b <- fit$coefficients
+    idx <- grep("^Subtype_Model", names(b))
+    or_df <- data.frame(Subtype = sub("^Subtype_Model", "", names(b)[idx]), OR = exp(b[idx]),
+                        OR_lo = exp(fit$ci.lower[idx]), OR_hi = exp(fit$ci.upper[idx]), P = fit$prob[idx])
+  } else {
+    fit <- stats::glm(form, data = dd, family = stats::binomial())
+    b <- stats::coef(fit)
+    idx <- grep("^Subtype_Model", names(b))
+    ci <- tryCatch(suppressMessages(stats::confint(fit, parm = names(b)[idx])),
+                   error = function(e) stats::confint.default(fit, parm = names(b)[idx]))
+    or_df <- data.frame(Subtype = sub("^Subtype_Model", "", names(b)[idx]), OR = exp(b[idx]),
+                        OR_lo = exp(ci[, 1]), OR_hi = exp(ci[, 2]), P = summary(fit)$coefficients[idx, 4])
+  }
+  ev <- dd %>%
+    dplyr::group_by(Subtype = as.character(Subtype_Model)) %>%
+    dplyr::summarise(N = dplyr::n(), Events = sum(y == 1), .groups = "drop")
+  data.frame(Subgroup = sg_label, Level = level_label, Subtype = group_levels) %>%
+    dplyr::left_join(ev, by = "Subtype") %>%
+    dplyr::left_join(or_df, by = "Subtype") %>%
+    dplyr::mutate(N_stratum = nrow(dd), Events_stratum = sum(dd$y == 1),
+                  Method = ifelse(use_firth, "Firth", "Logistic"))
+}
+#Interaction: likelihood ratio test (df = 3) comparing models with and without the subtype-by-subgroup term in the full cohort
+interaction_p <- function(dd, sg_var, covs) {
+  f0 <- stats::as.formula(paste("y ~ Subtype_Model +", sg_var, "+", paste(covs, collapse = " + ")))
+  f1 <- stats::as.formula(paste("y ~ Subtype_Model *", sg_var, "+", paste(covs, collapse = " + ")))
+  m0 <- stats::glm(f0, data = dd, family = stats::binomial())
+  m1 <- stats::glm(f1, data = dd, family = stats::binomial())
+  stats::anova(m0, m1, test = "LRT")$`Pr(>Chi)`[2]
+}
+#Overall (should match Figure 3)
+res_list <- list(fit_stratum(d, adjust_vars, "Overall", "All patients") %>% dplyr::mutate(P_int = NA_real_))
+#Run each subgroup
+for (s in subgroup_defs) {
+  covs <- setdiff(adjust_vars, s$drop)
+  p_int <- tryCatch(interaction_p(d, s$var, covs), error = function(e) NA_real_)
+  cat("\n---", s$label, "--- P for interaction =", p_text(p_int), "\n")
+  for (lv in levels(d[[s$var]])) {
+    dd <- d[d[[s$var]] == lv, , drop = FALSE]
+    cat(lv, ": n =", nrow(dd), "; AKI by subtype:\n")
+    print(table(dd$Subtype_Model, dd$y))
+    r <- tryCatch(fit_stratum(dd, covs, s$label, lv), error = function(e) {
+      cat("Model fitting failed:", conditionMessage(e), "\n")
+      NULL
+    })
+    if (!is.null(r)) res_list[[length(res_list) + 1]] <- r %>% dplyr::mutate(P_int = p_int)
+  }
+}
+res_all <- dplyr::bind_rows(res_list)
+#Bonferroni correction of interaction P values for the number of subgroups
+int_tab <- res_all %>%
+  dplyr::filter(Subgroup != "Overall") %>%
+  dplyr::distinct(Subgroup, P_int) %>%
+  dplyr::mutate(P_int_bonf = stats::p.adjust(P_int, method = "bonferroni"))
+res_all <- res_all %>% dplyr::left_join(int_tab %>% dplyr::select(Subgroup, P_int_bonf), by = "Subgroup")
+cat("\nP values for interaction:\n")
+print(int_tab)
+#Format Supplementary Table 7: interaction P values shown on the first row of each subgroup only
+sheet_s7 <- res_all %>%
+  dplyr::mutate(Subtype = factor(Subtype, levels = group_levels)) %>%
+  dplyr::group_by(Subgroup) %>%
+  dplyr::mutate(first_row = dplyr::row_number() == 1) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(`Stratum, events/N` = sprintf("%d/%d", Events_stratum, N_stratum),
+                `Subtype, events/N` = sprintf("%d/%d", Events, N),
+                `OR (95% CI)` = ifelse(Subtype == ref_level, "Reference", sprintf("%.2f (%.2f-%.2f)", OR, OR_lo, OR_hi)),
+                `P value` = ifelse(Subtype == ref_level, "", p_text(P)),
+                `P for interaction` = ifelse(first_row, p_text(P_int), ""),
+                `P for interaction (Bonferroni)` = ifelse(first_row, p_text(P_int_bonf), ""),
+                Model = Method) %>%
+  dplyr::select(Subgroup, Level, `Stratum, events/N`, Subtype, `Subtype, events/N`, `OR (95% CI)`, `P value`,
+                `P for interaction`, `P for interaction (Bonferroni)`, Model)
+wb <- openxlsx::createWorkbook()
+hs <- openxlsx::createStyle(textDecoration = "bold")
+openxlsx::addWorksheet(wb, "Supplementary Table 7")
+openxlsx::writeData(wb, "Supplementary Table 7", sheet_s7, headerStyle = hs)
+openxlsx::setColWidths(wb, "Supplementary Table 7", cols = seq_len(ncol(sheet_s7)), widths = "auto")
+openxlsx::saveWorkbook(wb, file.path(output_dir, "Supplementary Table 7.xlsx"), overwrite = TRUE)
+cat("\nSaved: Supplementary Table 7.xlsx\n")
+print(as.data.frame(sheet_s7))
+
+                                    
